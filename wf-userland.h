@@ -25,10 +25,10 @@ struct wf_configuration {
     int (*thread_count)(bool global);
 
     // Some applications require some extra triggering to reach global
-    // or local quiesence points. With these callbacks the library
+    // or local quiescence points. With these callbacks the library
     // issues such an application kicking.
-    void (*trigger_global_quiesence)();
-    void (*trigger_local_quiesence)();
+    void (*trigger_global_quiescence)();
+    void (*trigger_local_quiescence)();
 
     // OPTIONAL: Is called after patching is done.
     void (*patch_applied)();
@@ -38,13 +38,13 @@ struct wf_configuration {
 
 void wf_init(struct wf_configuration config);
 
-// The current thread has reached a global quiesence point. This
+// The current thread has reached a global quiescence point. This
 // thread represents more N threads (e.g. 16 pool workers)
 // The thread must invoke this repeatedly
-void wf_global_quiesence(char * name, unsigned int threads);
+void wf_global_quiescence(char * name, unsigned int threads);
 
-// The current thread has reached a local quiesence point.
+// The current thread has reached a local quiescence point.
 // The thread must invoke this repeatedly
-void wf_local_quiesence(char * name);
+void wf_local_quiescence(char * name);
 
 #endif

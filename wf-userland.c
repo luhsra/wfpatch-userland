@@ -12,7 +12,7 @@
 
 static pthread_t wf_patch_thread;
 static pthread_cond_t wf_cond_initiate;
-static pthread_cond_t wf_cond_all_threads_migrated; // local quiesence
+static pthread_cond_t wf_cond_all_threads_migrated; // local quiescence
 static pthread_barrier_t wf_global_barrier;
 
 static struct wf_configuration wf_config;
@@ -79,8 +79,8 @@ static void* wf_patch_thread_entry(void *arg) {
 
 typedef enum {
     IDLE,
-    GLOBAL_QUIESENCE,
-    LOCAL_QUIESENCE,
+    GLOBAL_QUIESCENCE,
+    LOCAL_QUIESCENCE,
 } wf_state_t;
 
 static volatile wf_state_t wf_state;
@@ -130,16 +130,16 @@ static void wf_initiate_patching(void) {
         pthread_barrier_init(&wf_global_barrier, NULL, threads + 1);
 
         ////////////////////////////////////////////////////////////////
-        // Now we reach global quiesence with our application
-        wf_state = GLOBAL_QUIESENCE;
+        // Now we reach global quiescence with our application
+        wf_state = GLOBAL_QUIESCENCE;
 
-        // Some Applications need a trigger to reach global quiesence
-        if (wf_config.trigger_global_quiesence)
-            wf_config.trigger_global_quiesence();
+        // Some Applications need a trigger to reach global quiescence
+        if (wf_config.trigger_global_quiescence)
+            wf_config.trigger_global_quiescence();
 
         pthread_barrier_wait(&wf_global_barrier);
         ////////////////////////////////////////////////////////////////
-        double wf_time_global_quiesence = wf_timestamp();
+        double wf_time_global_quiescence = wf_timestamp();
 
         for (unsigned int i = 0; i < threads; i++){
             printf(">>> %s %.2f (%d threads)\n",
@@ -149,14 +149,14 @@ static void wf_initiate_patching(void) {
                 );
         }
 
-        printf("reached global_quiesence in %f ms\n",
-               wf_time_global_quiesence - wf_time_start
+        printf("reached global_quiescence in %f ms\n",
+               wf_time_global_quiescence - wf_time_start
         );
 
         if (wf_config.patch_applied)
             wf_config.patch_applied();
         ////////////////////////////////////////////////////////////////
-        // Let's leave the global quiesence point
+        // Let's leave the global quiescence point
         wf_state = IDLE;
         pthread_barrier_wait(&wf_global_barrier);
         ////////////////////////////////////////////////////////////////
@@ -167,11 +167,11 @@ static void wf_initiate_patching(void) {
         wf_remaining_threads = threads;
         printf("Waiting for %d threads\n", wf_remaining_threads);
         wf_target_generation ++;
-        wf_state = LOCAL_QUIESENCE;
+        wf_state = LOCAL_QUIESCENCE;
 
-        // Some applications require a trigger to reach local quiesence
-        if (wf_config.trigger_local_quiesence)
-            wf_config.trigger_local_quiesence();
+        // Some applications require a trigger to reach local quiescence
+        if (wf_config.trigger_local_quiescence)
+            wf_config.trigger_local_quiescence();
 
         pthread_mutex_t dummy;
         pthread_mutex_init(&dummy, NULL);
@@ -208,13 +208,13 @@ static void wf_initiate_patching(void) {
     wf_timepoints = NULL;
 }
 
-void wf_global_quiesence(char *name, unsigned int threads) {
-    // every global quiesence point is also an local quiesence point
-    if (wf_state == LOCAL_QUIESENCE) {
-        wf_local_quiesence(name);
+void wf_global_quiescence(char *name, unsigned int threads) {
+    // every global quiescence point is also an local quiescence point
+    if (wf_state == LOCAL_QUIESCENCE) {
+        wf_local_quiescence(name);
         return;
     }
-    if (wf_state == GLOBAL_QUIESENCE) {
+    if (wf_state == GLOBAL_QUIESCENCE) {
         wf_timepoint(name, threads);
 
         pthread_barrier_wait(&wf_global_barrier);
@@ -222,8 +222,8 @@ void wf_global_quiesence(char *name, unsigned int threads) {
     }
 }
 
-void wf_local_quiesence(char *name) {
-    if (wf_state == LOCAL_QUIESENCE) {
+void wf_local_quiescence(char *name) {
+    if (wf_state == LOCAL_QUIESCENCE) {
         if (wf_target_generation != wf_current_generation) {
             wf_current_generation = wf_target_generation;
             int remaining = __atomic_sub_fetch(&wf_remaining_threads, 1, __ATOMIC_SEQ_CST);
