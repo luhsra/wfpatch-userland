@@ -1,5 +1,6 @@
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <pthread.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -114,10 +115,35 @@ int wf_timepoint(char *name, unsigned int threads) {
 }
 
 
+static FILE *wf_log_file;
+static void wf_log(char *fmt, ...) {
+    if (wf_log_file) {
+        va_list(args);
+        va_start(args, fmt);
+        vfprintf(wf_log_file, fmt, args);
+    }
+    
+}
+
+static
+void wf_timepoint_dump(int wf_time_start, int threads) {
+    for (unsigned int i = 0; i < threads; i++){
+        wf_log("- [migrated, \"%s\", %.4f, %d]\n",
+               wf_timepoints[i].name,
+               wf_timepoints[i].timestamp - wf_time_start,
+               wf_timepoints[i].threads
+            );
+    }
+}
+
 static void wf_initiate_patching(void) {
+    static int first = 0;
+    if (first) first = 1;
+    else wf_log("---\n");
     double wf_time_start = wf_timestamp();
     
     bool global = wf_config_get("WF_GLOBAL", 1);
+    wf_log("- [apply, 0.0, %s]\n", global ? "global" : "local");
 
     int threads = wf_config.thread_count(global);
 
@@ -127,6 +153,7 @@ static void wf_initiate_patching(void) {
     wf_state = IDLE;
 
     if (global) {
+        wf_target_generation ++;
         pthread_barrier_init(&wf_global_barrier, NULL, threads + 1);
 
         ////////////////////////////////////////////////////////////////
@@ -141,17 +168,12 @@ static void wf_initiate_patching(void) {
         ////////////////////////////////////////////////////////////////
         double wf_time_global_quiescence = wf_timestamp();
 
-        for (unsigned int i = 0; i < threads; i++){
-            printf(">>> %s %.2f (%d threads)\n",
-                   wf_timepoints[i].name,
-                   wf_timepoints[i].timestamp - wf_time_start,
-                   wf_timepoints[i].threads
-                );
-        }
+        wf_timepoint_dump(wf_time_start, threads);
+        wf_log("- [quiescence, %.4f]\n",
+               wf_time_global_quiescence - wf_time_start);
 
-        printf("reached global_quiescence in %f ms\n",
-               wf_time_global_quiescence - wf_time_start
-        );
+        wf_log("- [patched, %.4f]\n",
+               wf_timestamp() - wf_time_start);
 
         if (wf_config.patch_applied)
             wf_config.patch_applied();
@@ -163,9 +185,13 @@ static void wf_initiate_patching(void) {
 
         pthread_barrier_destroy(&wf_global_barrier);
     } else {
+        // FIXME: Insert Patching
+        wf_log("- [patched, %.4f]\n",
+               wf_timestamp() - wf_time_start);
+        
         ////////////////////////////////////////////////////////////////
         wf_remaining_threads = threads;
-        printf("Waiting for %d threads\n", wf_remaining_threads);
+        // DEBUG: fprintf(stderr, "Waiting for %d threads\n", wf_remaining_threads);
         wf_target_generation ++;
         wf_state = LOCAL_QUIESCENCE;
 
@@ -179,23 +205,20 @@ static void wf_initiate_patching(void) {
         pthread_cond_wait(&wf_cond_all_threads_migrated, &dummy);
         double wf_time_migrated = wf_timestamp();
 
-
-        for (unsigned int i = 0; i < threads; i++){
-            printf(">>> %s %.2f (%d threads)\n",
-                   wf_timepoints[i].name,
-                   wf_timepoints[i].timestamp - wf_time_start,
-                   wf_timepoints[i].threads
-                );
-        }
-
-        printf("migrated all threads in  in %f ms\n",
-               wf_time_migrated - wf_time_start
-            );
+        wf_timepoint_dump(wf_time_start, threads);
 
         wf_state = IDLE;
     }
 
-    printf("----\n");
+    double wf_time_end = wf_timestamp();
+    wf_log("- [finished, %.4f]\n",
+            wf_time_end - wf_time_start
+    );
+
+    fprintf(stderr, "Migration %d in %.4f\n",
+            wf_target_generation,
+            wf_time_end - wf_time_start
+        );
 
 
     // Must be called in all circumstances as thread count could take
@@ -242,6 +265,12 @@ void wf_init(struct wf_configuration config) {
     // Copy(!) away the configuration that we got from the
     // configuration
     wf_config = config;
+
+    char *logfile = getenv("WF_LOGFILE");
+    if (logfile) {
+        fprintf(stderr, "opening wf logfile: %s\n", logfile);
+        wf_log_file = fopen(logfile, "w+");
+    }
 
     // We start a thread that does all the heavy lifting of address
     // space management
