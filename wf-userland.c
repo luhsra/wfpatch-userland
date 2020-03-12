@@ -36,13 +36,17 @@ static int wf_config_get(char * name, int default_value) {
 }
 
 // Returns the a timestamp in miliseconds. The first call zeroes the clock
-static double wf_timestamp(void) { // returns 0 seconds first time called
+double wf_timestamp(void) { // returns 0 seconds first time called
     static struct timespec ts0;
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     if (!ts0.tv_sec) ts0 = ts;
     return (ts.tv_sec - ts0.tv_sec)*1000. + (ts.tv_nsec - ts0.tv_nsec) / 1000000.;
 }
+
+static volatile int wf_remaining_threads;
+static volatile int wf_target_generation;
+static __thread int wf_current_generation;
 
 
 static void* wf_patch_thread_entry(void *arg) {
@@ -64,9 +68,14 @@ static void* wf_patch_thread_entry(void *arg) {
     while (true) {
         // Wait for signal, or do periodic tests
         int wait = wf_config_get("WF_CYCLIC", -1);
+        int bound = wf_config_get("WF_CYCLIC_BOUND", -1);
         if (wait == -1) {
             pthread_cond_wait(&wf_cond_initiate, &wf_mutex);
         } else {
+            // FIXME: We use this for benchmarking
+            if (bound > 0 && wf_target_generation > bound) {
+                exit(0);
+            }
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
             ts.tv_sec += wait;
@@ -85,10 +94,6 @@ typedef enum {
 } wf_state_t;
 
 static volatile wf_state_t wf_state;
-
-static volatile int wf_remaining_threads;
-static volatile int wf_target_generation;
-static __thread int wf_current_generation;
 
 
 typedef struct {
@@ -122,7 +127,6 @@ static void wf_log(char *fmt, ...) {
         va_start(args, fmt);
         vfprintf(wf_log_file, fmt, args);
     }
-    
 }
 
 static
@@ -270,6 +274,8 @@ void wf_init(struct wf_configuration config) {
     if (logfile) {
         fprintf(stderr, "opening wf logfile: %s\n", logfile);
         wf_log_file = fopen(logfile, "w+");
+    } else {
+        wf_log_file = stderr;
     }
 
     // We start a thread that does all the heavy lifting of address
