@@ -51,6 +51,9 @@ void wf_global_quiescence(char * name, unsigned int threads);
 // The thread must invoke this repeatedly
 void wf_local_quiescence(char * name);
 
+// Are we currently in the phase of a
+bool wf_transition_ongoing(bool global);
+
 #ifdef __cplusplus
 }
 #endif

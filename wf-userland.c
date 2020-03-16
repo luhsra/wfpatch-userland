@@ -15,6 +15,7 @@ static pthread_t wf_patch_thread;
 static pthread_cond_t wf_cond_initiate;
 static pthread_cond_t wf_cond_all_threads_migrated; // local quiescence
 static pthread_barrier_t wf_global_barrier;
+static bool wf_global;
 
 static struct wf_configuration wf_config;
 
@@ -141,23 +142,32 @@ void wf_timepoint_dump(int wf_time_start, int threads) {
     }
 }
 
+bool wf_transition_ongoing(bool global) {
+    if (global && wf_global)
+        return wf_remaining_threads > 0;
+    if (!global && !wf_global)
+        return wf_remaining_threads > 0;
+    return false;
+}
+
 static void wf_initiate_patching(void) {
     static int first = 0;
     if (first) first = 1;
     else wf_log("---\n");
     double wf_time_start = wf_timestamp();
     
-    bool global = wf_config_get("WF_GLOBAL", 1);
-    wf_log("- [apply, 0.0, %s]\n", global ? "global" : "local");
 
-    int threads = wf_config.thread_count(global);
+    wf_log("- [apply, 0.0, %s]\n", wf_global ? "global" : "local");
+
+    int threads = wf_config.thread_count(wf_global);
+    wf_remaining_threads = threads;
 
     wf_timepoints = malloc(sizeof(time_thread_point_t) *  threads);
     wf_timepoints_idx = 0;
 
     wf_state = IDLE;
 
-    if (global) {
+    if (wf_global) {
         wf_target_generation ++;
         pthread_barrier_init(&wf_global_barrier, NULL, threads + 1);
 
@@ -195,7 +205,6 @@ static void wf_initiate_patching(void) {
                wf_timestamp() - wf_time_start);
         
         ////////////////////////////////////////////////////////////////
-        wf_remaining_threads = threads;
         // DEBUG: fprintf(stderr, "Waiting for %d threads\n", wf_remaining_threads);
         wf_target_generation ++;
         wf_state = LOCAL_QUIESCENCE;
@@ -244,6 +253,7 @@ void wf_global_quiescence(char *name, unsigned int threads) {
     }
     if (wf_state == GLOBAL_QUIESCENCE) {
         wf_timepoint(name, threads);
+        int remaining = __atomic_sub_fetch(&wf_remaining_threads, 1, __ATOMIC_SEQ_CST);
 
         pthread_barrier_wait(&wf_global_barrier);
         pthread_barrier_wait(&wf_global_barrier);
@@ -267,6 +277,8 @@ void wf_local_quiescence(char *name) {
 }
 
 void wf_init(struct wf_configuration config) {
+    wf_global = wf_config_get("WF_GLOBAL", 1);
+
     // Copy(!) away the configuration that we got from the
     // configuration
     wf_config = config;
