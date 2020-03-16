@@ -4,6 +4,10 @@
 #include <signal.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+    
 #define SIGPATCH (SIGRTMIN+0)
 
 /*
@@ -27,13 +31,13 @@ struct wf_configuration {
     // Some applications require some extra triggering to reach global
     // or local quiescence points. With these callbacks the library
     // issues such an application kicking.
-    void (*trigger_global_quiescence)();
-    void (*trigger_local_quiescence)();
+    void (*trigger_global_quiescence)(void);
+    void (*trigger_local_quiescence)(void);
 
     // OPTIONAL: Is called after patching is done.
-    void (*patch_applied)();
+    void (*patch_applied)(void);
     // OPTIONAL: Is called after all threads are migrated
-    void (*patch_done)();
+    void (*patch_done)(void);
 };
 
 void wf_init(struct wf_configuration config);
@@ -46,5 +50,9 @@ void wf_global_quiescence(char * name, unsigned int threads);
 // The current thread has reached a local quiescence point.
 // The thread must invoke this repeatedly
 void wf_local_quiescence(char * name);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

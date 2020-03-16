@@ -107,6 +107,7 @@ volatile unsigned int wf_timepoints_idx;
 
 int wf_timepoint(char *name, unsigned int threads) {
     assert (wf_timepoints != NULL);
+    // printf("%s %d\n", name, wf_timestamp());
 
     int idx = __atomic_fetch_add(&wf_timepoints_idx, 1, __ATOMIC_SEQ_CST);
     time_thread_point_t x = {
@@ -284,6 +285,6 @@ void wf_init(struct wf_configuration config) {
                                 &wf_patch_thread_entry, NULL)) != 0) {
         perror("pthread_create");
     }
-
+    
     pthread_setname_np(wf_patch_thread, "patcher");
 }
