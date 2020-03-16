@@ -33,7 +33,7 @@ class Tee(object):
 class OpenLDAPBenchmark(Experiment):
     inputs = {
         'openldap': Directory('/srv/scratch/dietrich/patch/openldap/'),
-        'client-host': String('lab-pc10'),
+        'client-host': String('10.23.33.110'),
         'ssh-key': File('/srv/scratch/dietrich/patch/ssh/id_rsa'),
         'delay': Integer(5),
         'clients': Integer(200),
@@ -43,7 +43,7 @@ class OpenLDAPBenchmark(Experiment):
     }
     outputs = {
         'server_log': File("server.log"),
-        'client_log': File("client.log"),
+        'client_log': File("client.log.gz"),
     }
 
     def on_client(self, cmd, *args, **kwargs):
@@ -72,26 +72,35 @@ class OpenLDAPBenchmark(Experiment):
         if self.delay.value > 0:
             self.on_client(f"sudo tc qdisc add dev eno1 root netem delay {self.delay.value}ms")
 
+        server_env = dict(
+            WF_CYCLIC="1",
+            WF_GLOBAL={True: "1", False: "0"}[self.global_barrier.value],
+            WF_CYCLIC_BOUND=str(self.count.value + 10),
+            WF_LOGFILE=self.server_log.path,
+        )
+
         server = subprocess.Popen([slapd, "-h", "ldap://0.0.0.0:1500"],
-                       env=dict(
-                           WF_CYCLIC="1",
-                           WF_GLOBAL={True: "1", False: "0"}[self.global_barrier.value],
-                           WF_CYCLIC_BOUND=str(self.count.value + 10),
-                           WF_LOGFILE=self.server_log.path,
-                       ))
+                                  env=server_env)
         client_out_fd = open(self.client_log.path, "w+")
+
+        
         client = subprocess.Popen(["ssh", "-i", self.ssh_key.path, self.client_host.value,
-                        "/tmp/openldap-benchmark",
-                        str(self.clients.value),
-                        str(self.records.value)],
-                       stdout=client_out_fd,
-                       stderr=subprocess.PIPE)
+                                   "/tmp/openldap-benchmark",
+                                   str(self.clients.value),
+                                   str(self.records.value)],
+                                  stdout=subprocess.PIPE,
+                                  stderr=sys.stderr)
+
+        gzip = subprocess.Popen("gzip",
+                                stdin=client.stdout,
+                                stdout=client_out_fd,
+                                stderr=sys.stderr)
+        
         server.communicate()
-        client.communicate()
+        #client.communicate()
         server_ret = server.wait()
         client.wait()
-
-        print(server_ret)
+        gzip.wait()
         assert server_ret == 0, "Server Failed"
 
         logging.info("Undo network config")
@@ -103,5 +112,17 @@ class OpenLDAPBenchmark(Experiment):
         return f"OpenLDAPBenchmark-global={g},delay={self.delay.value}"
 
 if __name__ == "__main__":
-    experiment = OpenLDAPBenchmark()
-    experiment(sys.argv[1:] + ["-s"])
+    if sys.argv[1] == "all":
+        for delay in [5, 10, 25, 50]:
+            for g in ["true", "false"]:
+                experiment = OpenLDAPBenchmark()
+                experiment(sys.argv[2:] + [
+                    "--count", "10000",
+                    "--delay", str(delay),
+                    "--global_barrier", g,
+                    "-s"
+                ])
+                
+    else:
+        experiment = OpenLDAPBenchmark()
+        experiment(sys.argv[1:] + ["-s"])
