@@ -15,7 +15,8 @@ static pthread_t wf_patch_thread;
 static pthread_cond_t wf_cond_initiate;
 static pthread_cond_t wf_cond_all_threads_migrated; // local quiescence
 static pthread_barrier_t wf_global_barrier;
-static bool wf_global;
+static int wf_global;
+
 
 static struct wf_configuration wf_config;
 
@@ -74,8 +75,9 @@ static void* wf_patch_thread_entry(void *arg) {
             pthread_cond_wait(&wf_cond_initiate, &wf_mutex);
         } else {
             // FIXME: We use this for benchmarking
-            if (bound > 0 && wf_target_generation > bound) {
-                exit(0);
+            if (bound > 0 && wf_target_generation >= bound) {
+                fprintf(stderr, "Cyclic test was OK\n");
+                _exit(0);
             }
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
@@ -128,6 +130,7 @@ static void wf_log(char *fmt, ...) {
         va_list(args);
         va_start(args, fmt);
         vfprintf(wf_log_file, fmt, args);
+        fflush(wf_log_file);
     }
 }
 
@@ -138,14 +141,14 @@ void wf_timepoint_dump(int wf_time_start, int threads) {
                wf_timepoints[i].name,
                wf_timepoints[i].timestamp - wf_time_start,
                wf_timepoints[i].threads
-            );
+           );
     }
 }
 
 bool wf_transition_ongoing(bool global) {
-    if (global && wf_global)
+    if ((global > 0)  && wf_global)
         return wf_remaining_threads > 0;
-    if (!global && !wf_global)
+    if ((global == 0) && !wf_global)
         return wf_remaining_threads > 0;
     return false;
 }
@@ -155,9 +158,11 @@ static void wf_initiate_patching(void) {
     if (first) first = 1;
     else wf_log("---\n");
     double wf_time_start = wf_timestamp();
-    
 
-    wf_log("- [apply, 0.0, %s]\n", wf_global ? "global" : "local");
+    wf_log("- [apply, 0.0, %s]\n",
+           wf_global > 0 ? "global" :
+           ( wf_global == 0 ? "local" : "base")
+        );
 
     int threads = wf_config.thread_count(wf_global);
     wf_remaining_threads = threads;
@@ -167,7 +172,7 @@ static void wf_initiate_patching(void) {
 
     wf_state = IDLE;
 
-    if (wf_global) {
+    if (wf_global > 0) {
         wf_target_generation ++;
         pthread_barrier_init(&wf_global_barrier, NULL, threads + 1);
 
@@ -199,7 +204,8 @@ static void wf_initiate_patching(void) {
         ////////////////////////////////////////////////////////////////
 
         pthread_barrier_destroy(&wf_global_barrier);
-    } else {
+        fprintf(stderr, "[Global] ");
+    } else if (wf_global == 0) {
         // FIXME: Insert Patching
         wf_log("- [patched, %.4f]\n",
                wf_timestamp() - wf_time_start);
@@ -222,6 +228,11 @@ static void wf_initiate_patching(void) {
         wf_timepoint_dump(wf_time_start, threads);
 
         wf_state = IDLE;
+        fprintf(stderr, "[Local] ");
+    } else {
+        /* WF_GLOBAL < 0 */
+        wf_target_generation ++;
+        fprintf(stderr, "[No] ");
     }
 
     double wf_time_end = wf_timestamp();
@@ -255,8 +266,10 @@ void wf_global_quiescence(char *name, unsigned int threads) {
         wf_timepoint(name, threads);
         int remaining = __atomic_sub_fetch(&wf_remaining_threads, 1, __ATOMIC_SEQ_CST);
 
+        // double before = wf_timestamp();
         pthread_barrier_wait(&wf_global_barrier);
         pthread_barrier_wait(&wf_global_barrier);
+        // fprintf(stderr, "..waited %f ms\n", wf_timestamp() - before);
     }
 }
 
