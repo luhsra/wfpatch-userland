@@ -43,8 +43,12 @@ struct wf_configuration {
 void wf_init(struct wf_configuration config);
 
 // The current thread has reached a global quiescence point. This
-// thread represents more N threads (e.g. 16 pool workers)
-// The thread must invoke this repeatedly
+// thread represents N morethreads (e.g. 16 pool workers). However,
+// the threads argument is purley for statistics. It does NOT
+// decrement the thread count by N but only by 1.
+//
+// The thread must invoke this repeatedly at every global quiesence
+// point.
 void wf_global_quiescence(char * name, unsigned int threads);
 
 // The current thread has reached a local quiescence point.
@@ -53,6 +57,12 @@ void wf_local_quiescence(char * name);
 
 // Are we currently in the phase of a
 bool wf_transition_ongoing(bool global);
+
+
+// Is a thread (that is counted in thread count), given birth to or
+// destroyed during a transition
+void wf_thread_birth(void);
+void wf_thread_death(void);
 
 #ifdef __cplusplus
 }

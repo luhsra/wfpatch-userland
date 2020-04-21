@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <time.h>
 #include <assert.h>
+#include <unistd.h>
+#include <pthread.h>
 #include "wf-userland.h"
 
 
@@ -38,12 +40,15 @@ static int wf_config_get(char * name, int default_value) {
 }
 
 // Returns the a timestamp in miliseconds. The first call zeroes the clock
-double wf_timestamp(void) { // returns 0 seconds first time called
-    static struct timespec ts0;
+static struct timespec wf_ts0;
+static void wf_timestamp_reset(void) { // returns 0 seconds first time called
+    clock_gettime(CLOCK_REALTIME, &wf_ts0);
+}
+
+static double wf_timestamp(void) { // returns 0 seconds first time called
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    if (!ts0.tv_sec) ts0 = ts;
-    return (ts.tv_sec - ts0.tv_sec)*1000. + (ts.tv_nsec - ts0.tv_nsec) / 1000000.;
+    return (ts.tv_sec - wf_ts0.tv_sec)*1000. + (ts.tv_nsec - wf_ts0.tv_nsec) / 1000000.;
 }
 
 static volatile int wf_remaining_threads;
@@ -157,9 +162,13 @@ static void wf_initiate_patching(void) {
     static int first = 0;
     if (first) first = 1;
     else wf_log("---\n");
-    double wf_time_start = wf_timestamp();
+    // Reset the time
+    wf_timestamp_reset();
+    double wf_time_start = 0.0;
 
-    wf_log("- [apply, 0.0, %s]\n",
+    wf_log("- [apply, %ld.%l09d, %s]\n",
+           wf_ts0.tv_sec,
+           wf_ts0.tv_nsec,
            wf_global > 0 ? "global" :
            ( wf_global == 0 ? "local" : "base")
         );
