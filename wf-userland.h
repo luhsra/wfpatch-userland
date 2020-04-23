@@ -24,8 +24,15 @@ extern "C" {
     WF_CYCLIC=<seconds> ./binary
  */
 struct wf_configuration {
+    // If this option is given, the application calls
+    // wf_thread_birth() and wf_thread_death() when threads are
+    // created or terminate.
+    //
+    // MANDATORY, if thread_count is not given.
+    bool track_threads;
+
     // Returns the number of threads that take part in the global barrier.
-    // THIS FUNCTION IS MANDATORY
+    // MANDATORY, if track_threads is False
     int (*thread_count)(bool global);
 
     // Some applications require some extra triggering to reach global
@@ -36,6 +43,7 @@ struct wf_configuration {
 
     // OPTIONAL: Is called after patching is done.
     void (*patch_applied)(void);
+
     // OPTIONAL: Is called after all threads are migrated
     void (*patch_done)(void);
 };
@@ -60,9 +68,10 @@ bool wf_transition_ongoing(bool global);
 
 
 // Is a thread (that is counted in thread count), given birth to or
-// destroyed during a transition
-void wf_thread_birth(void);
-void wf_thread_death(void);
+// destroyed during a transition. The application must call these
+// functions, if config.track_threads=1.
+void wf_thread_birth(char *name);
+void wf_thread_death(char *name);
 
 #ifdef __cplusplus
 }
