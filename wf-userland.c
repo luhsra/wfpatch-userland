@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <string.h>
+#include <link.h>
 #include <elf.h>
 
 #include "wf-userland.h"
@@ -29,6 +30,42 @@
 #define offset_to_ptr(offset) (((void*) (ehdr)) + ((int) (offset)))
 #define shdr_from_idx(idx) offset_to_ptr(ehdr->e_shoff + ehdr->e_shentsize * idx);
 #define section_name(shdr) (((char*) offset_to_ptr(shstr->sh_offset)) + shdr->sh_name)
+
+
+bool wf_relocate_calc(unsigned type,
+                        /* input */  uintptr_t reloc_src, uintptr_t reloc_dst, uintptr_t reloc_addend,
+                        /* output */ void **loc, uint64_t *val, char *size) {
+
+    switch (type) {
+    case R_X86_64_NONE:
+        return false;
+    case R_X86_64_PC32:
+    case R_X86_64_PLT32:
+        *loc = (void*) reloc_dst;
+        *val = (uint64_t)((uint32_t)((reloc_src + reloc_addend) - (uintptr_t) reloc_dst));
+        *size = 4;
+        break;
+    case R_X86_64_32S:
+        *loc = (void*) reloc_dst;
+        *val = (uint64_t)((int32_t)reloc_src + reloc_addend);
+        *size = 4;
+        break;
+    case R_X86_64_32:
+        *loc = (void*) reloc_dst;
+        *val = (uint64_t)((uint32_t)reloc_src + reloc_addend);
+        *size = 4;
+        break;
+    case R_X86_64_64:
+        *loc = (void*) reloc_dst;
+        *val = (uint64_t) reloc_src + reloc_addend;
+        *size = 8;
+        break;
+    default:
+        die("Unsupported relocation %ld for source %s (0x%lx <- 0x%lx)\n",
+            type, reloc_dst, reloc_src);
+    }
+    return true;
+}
 
 void wf_relocate(Elf64_Ehdr *ehdr, void *elf_end, Elf64_Shdr* shdr) {
     // Section Header String table
@@ -54,7 +91,7 @@ void wf_relocate(Elf64_Ehdr *ehdr, void *elf_end, Elf64_Shdr* shdr) {
         Elf64_Rela * rela = offset_to_ptr(shdr->sh_offset + i * shdr->sh_entsize);
 
         // Where to modify
-        void *reloc_dst = offset_to_ptr(shdr_target->sh_offset + rela->r_offset);
+        uintptr_t reloc_dst = (uintptr_t)  offset_to_ptr(shdr_target->sh_offset + rela->r_offset);
 
         printf("%p %d ", reloc_dst, ELF64_R_TYPE(rela->r_info));
         
@@ -79,34 +116,10 @@ void wf_relocate(Elf64_Ehdr *ehdr, void *elf_end, Elf64_Shdr* shdr) {
         void* loc;
         uint64_t val;
         char size;
-        switch (ELF64_R_TYPE(rela->r_info)) {
-            case R_X86_64_NONE:
-                continue;
-            case R_X86_64_PC32:
-            case R_X86_64_PLT32:
-                loc = reloc_dst;
-                val = (uint64_t)((uint32_t)((reloc_src + reloc_addend) - (uintptr_t) reloc_dst));
-                size = 4;
-                break;
-            case R_X86_64_32S:
-                loc = reloc_dst;
-                val = (uint64_t)((int32_t)reloc_src + reloc_addend);
-                size = 4;
-                break;
-            case R_X86_64_32:
-                loc = reloc_dst;
-                val = (uint64_t)((uint32_t)reloc_src + reloc_addend);
-                size = 4;
-                break;
-            case R_X86_64_64:
-                loc = reloc_dst;
-                val = (uint64_t) reloc_src + reloc_addend;
-                size = 8;
-                break;
-            default:
-                die("Unsupported relocation %ld for source %s (0x%lx <- 0x%lx)\n",
-                    ELF64_R_TYPE(rela->r_info), name, reloc_dst, reloc_src);
-        }
+        bool action = wf_relocate_calc(ELF64_R_TYPE(rela->r_info),
+                                       reloc_src, reloc_dst, reloc_addend,
+                                       &loc, &val, &size);
+        if (!action) continue;
 
         if (loc < (void*) ehdr || loc >= elf_end) {
 			die("bad relocation 0x%llx for symbol %s\n", loc, name);
@@ -179,7 +192,8 @@ struct kpatch_post_unpatch_callback {
 	char *objname;
 };
 
-void wf_load_patch(char *filename) {
+
+static Elf64_Ehdr * wf_load_elf(char *filename, void **elf_end) {
     int fd = open(filename, O_RDONLY);
     if (!fd) die_perror("open", "Could not open patch file: %s", filename);
 
@@ -189,8 +203,7 @@ void wf_load_patch(char *filename) {
 
     void *elf_start = mmap(NULL, size.st_size, PROT_WRITE, MAP_PRIVATE, fd, 0);
     if (elf_start == MAP_FAILED) die("mmap", "Could not map patch: %s", filename);
-    void *elf_end = elf_start + size.st_size;
-
+    *elf_end = elf_start + size.st_size;
 
     // 1. Find Tables
     Elf64_Ehdr *ehdr = elf_start;
@@ -201,6 +214,111 @@ void wf_load_patch(char *filename) {
     if (ehdr->e_ident[EI_CLASS] != ELFCLASS64) {
         die("Patch is not an 64-Bit ELF");
     }
+    return ehdr;
+}
+
+static void wf_unload_elf(Elf64_Ehdr *ehdr, void *elf_end) {
+    munmap(ehdr, (uintptr_t) elf_end - (uintptr_t) ehdr);
+}
+
+
+struct wf_symbol {
+    char * name;
+    void * addr;
+};
+
+static struct wf_symbol *wf_symbols = NULL;
+static unsigned wf_symbol_count;
+
+static int dl_iterate_cb_stop;
+static int
+dl_iterate_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr *) data;
+    if (dl_iterate_cb_stop) return 0;
+    dl_iterate_cb_stop = 1;
+
+    // Section Header String table
+    Elf64_Shdr *shstr = shdr_from_idx(ehdr->e_shstrndx);
+
+    // Allocate enough space for all symbols
+    unsigned symbols_max = 0;
+    for (unsigned i = 0; i < ehdr->e_shnum; i++) {
+        Elf64_Shdr * shdr = shdr_from_idx(i);
+        if (shdr->sh_type == SHT_SYMTAB) {
+            Elf64_Sym *symbol_table = offset_to_ptr(shdr->sh_offset);
+            unsigned  symbol_count = shdr->sh_size / shdr->sh_entsize;
+            symbols_max += symbol_count;
+        }
+    }
+    wf_symbols = malloc(sizeof(struct wf_symbol) * symbols_max);
+    if (!wf_symbols) die_perror("malloc", "could not allocate space for symbols");
+
+    // Iterate over loaded Segments
+    for (int j = 0; j < info->dlpi_phnum; j++) {
+        const Elf64_Phdr *phdr = &info->dlpi_phdr[j];
+        if (phdr->p_type != PT_LOAD) continue;
+        void *seg_vstart = (void *) (info->dlpi_addr + info->dlpi_phdr[j].p_vaddr);
+
+        // Find all Symbols in ELF that are in this segment
+        for (unsigned i = 0; i < ehdr->e_shnum; i++) {
+            Elf64_Shdr * shdr = shdr_from_idx(i);
+            if (shdr->sh_type == SHT_SYMTAB) {
+                Elf64_Sym *symbol_table = offset_to_ptr(shdr->sh_offset);
+                unsigned  symbol_count = shdr->sh_size / shdr->sh_entsize;
+
+                Elf64_Shdr *shdr_strtab = shdr_from_idx(shdr->sh_link);
+                char *strtab = offset_to_ptr(shdr_strtab->sh_offset);
+
+                for (unsigned s = 0; s < symbol_count; s++) {
+                    int sym_type = ELF32_ST_TYPE(symbol_table[s].st_info);
+                    if (sym_type != STT_FUNC && sym_type != STT_OBJECT)
+                        continue;
+
+                    unsigned sym_offset = symbol_table[s].st_value;
+                    if (phdr->p_offset <= sym_offset
+                        && sym_offset < phdr->p_offset + phdr->p_filesz) {
+
+                        unsigned offset_in_segment = sym_offset - phdr->p_offset;
+                        void *sym_addr = seg_vstart + offset_in_segment;
+                        
+                        char *name = strtab + symbol_table[s].st_name;
+
+                        wf_symbols[wf_symbol_count].name = strdup(name);
+                        wf_symbols[wf_symbol_count].addr = sym_addr;
+                        wf_symbol_count += 1;
+                        printf("found %s @ %p \n", name, sym_addr);
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+
+void *wf_load_symbols(char *filename) {
+    void * elf_end;
+    Elf64_Ehdr * ehdr = wf_load_elf(filename, &elf_end);
+
+    dl_iterate_cb_stop = false;
+    dl_iterate_phdr(dl_iterate_cb, ehdr);
+
+    wf_unload_elf(ehdr, elf_end);
+}
+
+void *wf_find_symbol(char * name) {
+    for (unsigned i = 0; i < wf_symbol_count; i++) {
+        if (strcmp(name, wf_symbols[i].name) == 0) {
+            return wf_symbols[i].addr;
+        }
+    }
+    return 0;
+}
+
+
+void wf_load_patch(char *filename) {
+    void * elf_end;
+    Elf64_Ehdr * ehdr = wf_load_elf(filename, &elf_end);
     Elf64_Shdr *shstr = shdr_from_idx(ehdr->e_shstrndx);
 
 
@@ -229,8 +347,7 @@ void wf_load_patch(char *filename) {
     }
 
     // Iterate over all symbols
-    
-    printf("%d sections\n", ehdr->e_shnum);
+    // printf("%d sections\n", ehdr->e_shnum);
 
     // Extract arrays
     struct kpatch_patch_func *funcs = offset_to_ptr(kpatch_funcs->sh_offset);
@@ -249,14 +366,21 @@ void wf_load_patch(char *filename) {
         printf("kpatch_func: name:%s objname:%s new: %p\n",
                funcs[f].name, funcs[f].objname, funcs[f].new_addr);
 
+        funcs[f].old_addr = wf_find_symbol(funcs[f].name);
+        printf("PATCH %p -> %p\n", funcs[f].old_addr, funcs[f].new_addr);
 
         for (unsigned r = 0; r < relocations_count; r++) {
             if (!(funcs[f].new_addr <= relocations[r].dest
                   && relocations[r].dest <= (funcs[f].new_addr + funcs[f].new_size)))
                 continue;
-            printf("  kpatch_relocation: name:%s/%s objname:%s type=%d, external=%d, *%p = ...\n",
-                   relocations[r].ksym->objname, relocations[r].ksym->name,
-                   relocations[r].objname, relocations[r].type, relocations[r].external, relocations[r].dest);
+
+            void *ksym_addr = wf_find_symbol(relocations[r].ksym->name);
+            // printf("  kpatch_relocation: name:%s/%s objname:%s type=%d, external=%d, *%p\n",
+            //        relocations[r].ksym->objname, relocations[r].ksym->name,
+            //        relocations[r].objname, relocations[r].type, relocations[r].external, relocations[r].dest);
+            
+            
+            printf("PATCH %p -> %p\n", relocations[r].dest, ksym_addr);
 
 
             // Fixme OLD section
@@ -265,12 +389,6 @@ void wf_load_patch(char *filename) {
         }
     }
 
-    /* for (unsigned i = 0; i < symbols_count; i++) { */
-    /*     printf("kpatch_symbol: name:%s objname:%s %p\n", */
-    /*            symbols[i].name, symbols[i].objname, symbols[i].src); */
-    /*     // Fixme OLD section */
-    /* } */
-
     for (unsigned r = 0; r < relocations_count; r++) {
         if (relocations[r].dest == 0) continue; // already handled
 
@@ -278,6 +396,7 @@ void wf_load_patch(char *filename) {
                relocations[r].ksym->objname, relocations[r].ksym->name,
                relocations[r].objname, relocations[r].type, relocations[r].external, relocations[r].dest);
         // Fixme OLD section
+        assert(false && "All relocations should have been handleded above");
     }
 
     exit(0);
@@ -624,7 +743,7 @@ void wf_thread_death(char *name) {
 
 void wf_init(struct wf_configuration config) {
     wf_global = wf_config_get("WF_GLOBAL", 1);
-
+    wf_load_symbols("/proc/self/exe");
     wf_load_patch("patch.o");
 
     assert((config.track_threads
