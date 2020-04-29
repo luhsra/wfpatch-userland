@@ -796,8 +796,8 @@ void wf_thread_death(char *name) {
 
 void wf_init(struct wf_configuration config) {
     wf_global = wf_config_get("WF_GLOBAL", 1);
-    wf_load_symbols("/proc/self/exe");
-    wf_load_patch("patch.o");
+    // wf_load_symbols("/proc/self/exe");
+    //wf_load_patch("patch.o");
 
     assert((config.track_threads
             || config.thread_count != NULL)
