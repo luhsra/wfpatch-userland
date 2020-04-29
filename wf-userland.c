@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <pthread.h>
+#include <stddef.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <time.h>
@@ -11,6 +12,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <string.h>
@@ -42,7 +44,9 @@ bool wf_relocate_calc(unsigned type,
     case R_X86_64_PC32:
     case R_X86_64_PLT32:
         *loc = (void*) reloc_dst;
-        *val = (uint64_t)((uint32_t)((reloc_src + reloc_addend) - (uintptr_t) reloc_dst));
+        *val = (uint64_t)((intptr_t)reloc_src + (ptrdiff_t) reloc_addend - (intptr_t) reloc_dst);
+        printf("\ndiff %d\n", *val);
+        // assert((INT_MIN <= *val) && (val <= INT_MAX) && "Patch was loaded tooo far away");
         *size = 4;
         break;
     case R_X86_64_32S:
@@ -193,7 +197,7 @@ struct kpatch_post_unpatch_callback {
 };
 
 
-static Elf64_Ehdr * wf_load_elf(char *filename, void **elf_end) {
+static Elf64_Ehdr * wf_load_elf(char *filename, void *hint, void **elf_end) {
     int fd = open(filename, O_RDONLY);
     if (!fd) die_perror("open", "Could not open patch file: %s", filename);
 
@@ -201,7 +205,7 @@ static Elf64_Ehdr * wf_load_elf(char *filename, void **elf_end) {
     struct stat size;
     if (fstat(fd, &size) == -1) die_perror("fstat", "Could not determine size: %s", filename);
 
-    void *elf_start = mmap(NULL, size.st_size, PROT_WRITE, MAP_PRIVATE, fd, 0);
+    void *elf_start = mmap(hint, size.st_size, PROT_WRITE, MAP_PRIVATE, fd, 0);
     if (elf_start == MAP_FAILED) die("mmap", "Could not map patch: %s", filename);
     *elf_end = elf_start + size.st_size;
 
@@ -230,6 +234,7 @@ struct wf_symbol {
 static struct wf_symbol *wf_symbols = NULL;
 static unsigned wf_symbol_count;
 
+static void *wf_first_segment_start = NULL;
 static int dl_iterate_cb_stop;
 static int
 dl_iterate_cb(struct dl_phdr_info *info, size_t size, void *data) {
@@ -258,6 +263,8 @@ dl_iterate_cb(struct dl_phdr_info *info, size_t size, void *data) {
         const Elf64_Phdr *phdr = &info->dlpi_phdr[j];
         if (phdr->p_type != PT_LOAD) continue;
         void *seg_vstart = (void *) (info->dlpi_addr + info->dlpi_phdr[j].p_vaddr);
+        if (wf_first_segment_start == NULL)
+            wf_first_segment_start = seg_vstart;
 
         // Find all Symbols in ELF that are in this segment
         for (unsigned i = 0; i < ehdr->e_shnum; i++) {
@@ -298,7 +305,7 @@ dl_iterate_cb(struct dl_phdr_info *info, size_t size, void *data) {
 
 void *wf_load_symbols(char *filename) {
     void * elf_end;
-    Elf64_Ehdr * ehdr = wf_load_elf(filename, &elf_end);
+    Elf64_Ehdr * ehdr = wf_load_elf(filename, 0, &elf_end);
 
     dl_iterate_cb_stop = false;
     dl_iterate_phdr(dl_iterate_cb, ehdr);
@@ -315,10 +322,27 @@ void *wf_find_symbol(char * name) {
     return 0;
 }
 
+unsigned pagesize;
+void *addr_to_page(void *addr) {
+    if (pagesize == 0) {
+        pagesize = sysconf(_SC_PAGESIZE);
+    }
+    void *page = addr - ((uintptr_t) addr % pagesize);
+    return page;
+}
+
 
 void wf_load_patch(char *filename) {
     void * elf_end;
-    Elf64_Ehdr * ehdr = wf_load_elf(filename, &elf_end);
+    printf("%p\n", wf_first_segment_start);
+    void * hint = wf_first_segment_start - 0x1000 * 1024;
+    Elf64_Ehdr * ehdr = wf_load_elf(filename, hint, &elf_end);
+    printf("%p\n", ehdr);
+
+    int rc = mprotect(ehdr, elf_end - (void*)ehdr, PROT_WRITE | PROT_EXEC | PROT_READ);
+    if (rc == -1) die_perror("mprotect", "Could not mprotect patch");
+
+
     Elf64_Shdr *shstr = shdr_from_idx(ehdr->e_shstrndx);
 
 
@@ -366,8 +390,19 @@ void wf_load_patch(char *filename) {
         printf("kpatch_func: name:%s objname:%s new: %p\n",
                funcs[f].name, funcs[f].objname, funcs[f].new_addr);
 
-        funcs[f].old_addr = wf_find_symbol(funcs[f].name);
+        funcs[f].old_addr = (uintptr_t) wf_find_symbol(funcs[f].name);
         printf("PATCH %p -> %p\n", funcs[f].old_addr, funcs[f].new_addr);
+        // Insert a call to the new function
+        char * jumpsite = (char *)funcs[f].old_addr;
+        void* page = addr_to_page(jumpsite);
+        int rc = mprotect(page, pagesize, PROT_WRITE | PROT_EXEC | PROT_READ);
+        
+        if (rc == -1) die_perror("mprotect", "Callsite Patching\n");
+        
+        *jumpsite = 0xe9; // call == 0xe9 OF OF OF OF
+        *(int32_t*)(jumpsite + 1) = funcs[f].new_addr - 5 -funcs[f].old_addr;
+        mprotect(page, pagesize, PROT_EXEC |PROT_READ);
+
 
         for (unsigned r = 0; r < relocations_count; r++) {
             if (!(funcs[f].new_addr <= relocations[r].dest
@@ -375,13 +410,32 @@ void wf_load_patch(char *filename) {
                 continue;
 
             void *ksym_addr = wf_find_symbol(relocations[r].ksym->name);
+            if (!ksym_addr) {
+                die("Could not find symbol %s in original binary",
+                    relocations[r].ksym->name);
+            }
             // printf("  kpatch_relocation: name:%s/%s objname:%s type=%d, external=%d, *%p\n",
             //        relocations[r].ksym->objname, relocations[r].ksym->name,
             //        relocations[r].objname, relocations[r].type, relocations[r].external, relocations[r].dest);
+            void* loc;
+            uint64_t val;
+            char size;
             
-            
-            printf("PATCH %p -> %p\n", relocations[r].dest, ksym_addr);
+            bool action = wf_relocate_calc(
+                relocations[r].type,
+                (uintptr_t) ksym_addr, relocations[r].dest, relocations[r].addend,
+                &loc, &val, &size
+            );
+            if (!action) continue;
+            printf("%p %p %d\n", ksym_addr, relocations[r].dest, relocations[r].addend);
+            printf("PATCH *%p[%d] = %d\n", loc, size, val);
 
+            if (size == 4) {
+                *(uint32_t *) loc = val;
+            } else if (size == 8) {
+                *(uint64_t *) loc = val;
+            } else
+                die("Invalid relocation size");
 
             // Fixme OLD section
 
@@ -399,7 +453,6 @@ void wf_load_patch(char *filename) {
         assert(false && "All relocations should have been handleded above");
     }
 
-    exit(0);
 }
 
 
