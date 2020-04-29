@@ -8,10 +8,250 @@
 #include <assert.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <stdint.h>
+#include <string.h>
+#include <elf.h>
+
 #include "wf-userland.h"
 
 
 #define die(...) do { fprintf(stderr, __VA_ARGS__); exit(EXIT_FAILURE); } while(0)
+#define die_perror(m, ...) do { perror(m); fprintf(stderr, __VA_ARGS__); exit(EXIT_FAILURE); } while(0)
+
+
+////////////////////////////////////////////////////////////////
+// Apply Patch
+// Magic Names: ehdr, shstr
+#define offset_to_ptr(offset) (((void*) (ehdr)) + ((int) (offset)))
+#define shdr_from_idx(idx) offset_to_ptr(ehdr->e_shoff + ehdr->e_shentsize * idx);
+#define section_name(shdr) (((char*) offset_to_ptr(shstr->sh_offset)) + shdr->sh_name)
+
+void wf_relocate(Elf64_Ehdr *ehdr, void *elf_end, Elf64_Shdr* shdr) {
+    // Section Header String table
+    Elf64_Shdr *shstr = shdr_from_idx(ehdr->e_shstrndx);
+    
+    Elf64_Shdr *shdr_symtab = shdr_from_idx(shdr->sh_link);
+    Elf64_Sym *symbol_table = offset_to_ptr(shdr_symtab->sh_offset);
+    
+    Elf64_Shdr *shdr_strtab = shdr_from_idx(shdr_symtab->sh_link);
+    char *strtab = offset_to_ptr(shdr_strtab->sh_offset);
+
+    // Which section should be modified
+    Elf64_Shdr * shdr_target = shdr_from_idx(shdr->sh_info);
+
+    unsigned  rela_num = shdr->sh_size / shdr->sh_entsize;
+    printf("%s: %d relocs in %s\n",
+           section_name(shdr),
+           rela_num,
+           section_name(shdr_target));
+
+    Elf64_Rela * rela = offset_to_ptr(shdr->sh_offset);
+    for (unsigned i = 0; i < rela_num; i++) {
+        Elf64_Rela * rela = offset_to_ptr(shdr->sh_offset + i * shdr->sh_entsize);
+
+        // Where to modify
+        void *reloc_dst = offset_to_ptr(shdr_target->sh_offset + rela->r_offset);
+
+        printf("%p %d ", reloc_dst, ELF64_R_TYPE(rela->r_info));
+        
+        Elf64_Sym * symbol = &symbol_table[ELF64_R_SYM(rela->r_info)];
+        Elf64_Shdr * symbol_section = shdr_from_idx(symbol->st_shndx);
+        assert (symbol->st_shndx != 0 && "I hope this catches undefined symbols");
+
+        // What should be written into that place
+        uintptr_t reloc_src;
+        char *name;
+        if (ELF64_ST_TYPE(symbol->st_info) == STT_SECTION) {
+            name = section_name(symbol_section);
+            reloc_src = (uintptr_t) offset_to_ptr(symbol_section->sh_offset);
+            printf("SEC %s", section_name(symbol_section));
+        } else {
+            reloc_src = (uintptr_t) offset_to_ptr(symbol_section->sh_offset + symbol->st_value);
+            printf("SYM %s/%s", section_name(symbol_section), strtab + symbol->st_name);
+        }
+        unsigned reloc_addend = rela->r_addend;
+        printf("+%d => ", rela->r_addend);
+
+        void* loc;
+        uint64_t val;
+        char size;
+        switch (ELF64_R_TYPE(rela->r_info)) {
+            case R_X86_64_NONE:
+                continue;
+            case R_X86_64_PC32:
+            case R_X86_64_PLT32:
+                loc = reloc_dst;
+                val = (uint64_t)((uint32_t)((reloc_src + reloc_addend) - (uintptr_t) reloc_dst));
+                size = 4;
+                break;
+            case R_X86_64_32S:
+                loc = reloc_dst;
+                val = (uint64_t)((int32_t)reloc_src + reloc_addend);
+                size = 4;
+                break;
+            case R_X86_64_32:
+                loc = reloc_dst;
+                val = (uint64_t)((uint32_t)reloc_src + reloc_addend);
+                size = 4;
+                break;
+            case R_X86_64_64:
+                loc = reloc_dst;
+                val = (uint64_t) reloc_src + reloc_addend;
+                size = 8;
+                break;
+            default:
+                die("Unsupported relocation %ld for source %s (0x%lx <- 0x%lx)\n",
+                    ELF64_R_TYPE(rela->r_info), name, reloc_dst, reloc_src);
+        }
+
+        if (loc < (void*) ehdr || loc >= elf_end) {
+			die("bad relocation 0x%llx for symbol %s\n", loc, name);
+		}
+
+        printf("*%p = 0x%lx [%d]\n", loc, val, size);
+
+        if (size == 4) {
+            *(uint32_t *) loc = val;
+        } else if (size == 8) {
+            *(uint64_t *) loc = val;
+        } else
+            die("Invalid relocation size");
+
+    }
+}
+
+struct kpatch_patch_func {
+	unsigned long new_addr;
+	unsigned long new_size;
+	unsigned long old_addr;
+	unsigned long old_size;
+	unsigned long sympos;
+	char *name;
+	char *objname;
+};
+
+struct kpatch_relocation {
+	unsigned long dest;
+	unsigned int type;
+	int external;
+	long addend;
+	char *objname; /* object to which this rela applies to */
+	struct kpatch_symbol *ksym;
+};
+
+struct kpatch_symbol {
+	unsigned long src;
+	unsigned long sympos;
+	unsigned char bind, type;
+	char *name;
+	char *objname; /* object to which this sym belongs */
+};
+
+struct kpatch_patch_dynrela {
+	unsigned long dest;
+	unsigned long src;
+	unsigned long type;
+	unsigned long sympos;
+	char *name;
+	char *objname;
+	int external;
+	long addend;
+};
+
+struct kpatch_pre_patch_callback {
+	int (*callback)(void *obj);
+	char *objname;
+};
+struct kpatch_post_patch_callback {
+	void (*callback)(void *obj);
+	char *objname;
+};
+struct kpatch_pre_unpatch_callback {
+	void (*callback)(void *obj);
+	char *objname;
+};
+struct kpatch_post_unpatch_callback {
+	void (*callback)(void *obj);
+	char *objname;
+};
+
+void wf_load_patch(char *filename) {
+    int fd = open(filename, O_RDONLY);
+    if (!fd) die_perror("open", "Could not open patch file: %s", filename);
+
+    // Mapt the whole file
+    struct stat size;
+    if (fstat(fd, &size) == -1) die_perror("fstat", "Could not determine size: %s", filename);
+
+    void *elf_start = mmap(NULL, size.st_size, PROT_WRITE, MAP_PRIVATE, fd, 0);
+    if (elf_start == MAP_FAILED) die("mmap", "Could not map patch: %s", filename);
+    void *elf_end = elf_start + size.st_size;
+
+
+    // 1. Find Tables
+    Elf64_Ehdr *ehdr = elf_start;
+
+	if (strncmp((const char *)ehdr->e_ident, "\177ELF", 4) != 0) {
+		die("Patch is not an ELF file");
+	}
+    if (ehdr->e_ident[EI_CLASS] != ELFCLASS64) {
+        die("Patch is not an 64-Bit ELF");
+    }
+    Elf64_Shdr *shstr = shdr_from_idx(ehdr->e_shstrndx);
+
+
+    // Extract all related sections from patch file
+    Elf64_Shdr *kpatch_strings = NULL, *kpatch_funcs = NULL, *kpatch_relocs = NULL, *kpatch_symbols=NULL;
+
+    for (unsigned i = 0; i < ehdr->e_shnum; i++) {
+        Elf64_Shdr * shdr = shdr_from_idx(i);
+
+        // Name of section
+        char *name = section_name(shdr);
+
+        // Perform relocations
+        if (shdr->sh_type == SHT_RELA) {
+            wf_relocate(ehdr, elf_end, shdr);
+        }
+
+        if (strcmp(name, ".kpatch.strings") == 0)
+            kpatch_strings = shdr;
+        else if (strcmp(name, ".kpatch.funcs") == 0)
+            kpatch_funcs = shdr;
+        else if (strcmp(name, ".kpatch.relocations") == 0)
+            kpatch_relocs = shdr;
+        else if (strcmp(name, ".kpatch.symbols") == 0)
+            kpatch_symbols = shdr;
+    }
+
+    // Iterate over all symbols
+    
+    printf("%d sections\n", ehdr->e_shnum);
+
+    // Functions
+    struct kpatch_patch_func *func = offset_to_ptr(kpatch_funcs->sh_offset);
+    int func_count = kpatch_funcs->sh_size / sizeof(struct kpatch_patch_func);
+    assert(func_count * sizeof(struct kpatch_patch_func) == kpatch_funcs->sh_size);
+    
+    printf("funcs: %p\n", func);
+    for (unsigned i = 0; i < func_count; i++) {
+        printf("kpatch_func: name:%s objname:%s new: %p\n", func->name, func->objname, func->new_addr);
+        // Fixme OLD section
+    }
+
+    
+
+    exit(0);
+}
+
+
+
+////////////////////////////////////////////////////////////////
+// Patching Thread and API
 
 static pthread_t wf_patch_thread;
 static pthread_cond_t wf_cond_initiate;
@@ -349,6 +589,8 @@ void wf_thread_death(char *name) {
 
 void wf_init(struct wf_configuration config) {
     wf_global = wf_config_get("WF_GLOBAL", 1);
+
+    wf_load_patch("patch.o");
 
     assert((config.track_threads
             || config.thread_count != NULL)

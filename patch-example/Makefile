@@ -1,6 +1,6 @@
 .PHONY: all clean
 
-CFLAGS=-ffunction-sections -fdata-sections
+CFLAGS=-ffunction-sections -fdata-sections -D_GNU_SOURCE -g
 LDFLAGS=-lpthread
 
 all: patch.o
@@ -21,7 +21,7 @@ bin-new: obj1-new.o main.o obj2.o wf-userland.o
 	gcc -o $@ $^ ${LDFLAGS}
 
 %.o: %.c
-	gcc -ffunction-sections -fdata-sections -c -o $@ $<
+	gcc ${CFLAGS} -c -o $@ $<
 
 create-diff-object:
 	${MAKE} -C ../kpatch/kpatch-build $@
