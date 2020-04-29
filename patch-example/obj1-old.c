@@ -13,13 +13,3 @@ int test0(int base, int len) {
         printf("> %d\n", ret);
     }
 }
-
-int main(void) {
-    int i = 1000;
-    while (1) {
-        test0(i, 5);
-        sleep(2);
-        i += 1000;
-    }
-    return 0;
-}

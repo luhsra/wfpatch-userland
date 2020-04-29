@@ -1,0 +1,5 @@
+[external "kpatch"]
+	path = kpatch
+	url = git@ess-git.inf.uos.de:research/code-patching/kpatch.git
+	branch = master
+	vcs = git
