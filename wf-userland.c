@@ -205,7 +205,7 @@ void wf_load_patch(char *filename) {
 
 
     // Extract all related sections from patch file
-    Elf64_Shdr *kpatch_strings = NULL, *kpatch_funcs = NULL, *kpatch_relocs = NULL, *kpatch_symbols=NULL;
+    Elf64_Shdr *kpatch_strings = NULL, *kpatch_funcs = NULL, *kpatch_relocations = NULL, *kpatch_symbols=NULL;
 
     for (unsigned i = 0; i < ehdr->e_shnum; i++) {
         Elf64_Shdr * shdr = shdr_from_idx(i);
@@ -223,7 +223,7 @@ void wf_load_patch(char *filename) {
         else if (strcmp(name, ".kpatch.funcs") == 0)
             kpatch_funcs = shdr;
         else if (strcmp(name, ".kpatch.relocations") == 0)
-            kpatch_relocs = shdr;
+            kpatch_relocations = shdr;
         else if (strcmp(name, ".kpatch.symbols") == 0)
             kpatch_symbols = shdr;
     }
@@ -232,18 +232,53 @@ void wf_load_patch(char *filename) {
     
     printf("%d sections\n", ehdr->e_shnum);
 
-    // Functions
-    struct kpatch_patch_func *func = offset_to_ptr(kpatch_funcs->sh_offset);
-    int func_count = kpatch_funcs->sh_size / sizeof(struct kpatch_patch_func);
-    assert(func_count * sizeof(struct kpatch_patch_func) == kpatch_funcs->sh_size);
-    
-    printf("funcs: %p\n", func);
-    for (unsigned i = 0; i < func_count; i++) {
-        printf("kpatch_func: name:%s objname:%s new: %p\n", func->name, func->objname, func->new_addr);
-        // Fixme OLD section
+    // Extract arrays
+    struct kpatch_patch_func *funcs = offset_to_ptr(kpatch_funcs->sh_offset);
+    int funcs_count = kpatch_funcs->sh_size / sizeof(struct kpatch_patch_func);
+    assert(funcs_count * sizeof(struct kpatch_patch_func) == kpatch_funcs->sh_size);
+
+    struct kpatch_symbol *symbols = offset_to_ptr(kpatch_symbols->sh_offset);
+    int symbols_count = kpatch_symbols->sh_size / sizeof(struct kpatch_symbol);
+    assert(symbols_count * sizeof(struct kpatch_symbol) == kpatch_symbols->sh_size);
+
+    struct kpatch_relocation *relocations = offset_to_ptr(kpatch_relocations->sh_offset);
+    int relocations_count = kpatch_relocations->sh_size / sizeof(struct kpatch_relocation);
+    assert(relocations_count * sizeof(struct kpatch_relocation) == kpatch_relocations->sh_size);
+
+    for (unsigned f = 0; f < funcs_count; f++) {
+        printf("kpatch_func: name:%s objname:%s new: %p\n",
+               funcs[f].name, funcs[f].objname, funcs[f].new_addr);
+
+
+        for (unsigned r = 0; r < relocations_count; r++) {
+            if (!(funcs[f].new_addr <= relocations[r].dest
+                  && relocations[r].dest <= (funcs[f].new_addr + funcs[f].new_size)))
+                continue;
+            printf("  kpatch_relocation: name:%s/%s objname:%s type=%d, external=%d, *%p = ...\n",
+                   relocations[r].ksym->objname, relocations[r].ksym->name,
+                   relocations[r].objname, relocations[r].type, relocations[r].external, relocations[r].dest);
+
+
+            // Fixme OLD section
+
+            relocations[r].dest = 0;
+        }
     }
 
-    
+    /* for (unsigned i = 0; i < symbols_count; i++) { */
+    /*     printf("kpatch_symbol: name:%s objname:%s %p\n", */
+    /*            symbols[i].name, symbols[i].objname, symbols[i].src); */
+    /*     // Fixme OLD section */
+    /* } */
+
+    for (unsigned r = 0; r < relocations_count; r++) {
+        if (relocations[r].dest == 0) continue; // already handled
+
+        printf("kpatch_relocation: name:%s/%s objname:%s type=%d, external=%d, *%p = ... (SHOULD NOT HAPPEN)\n",
+               relocations[r].ksym->objname, relocations[r].ksym->name,
+               relocations[r].objname, relocations[r].type, relocations[r].external, relocations[r].dest);
+        // Fixme OLD section
+    }
 
     exit(0);
 }
