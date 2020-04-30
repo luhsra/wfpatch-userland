@@ -443,67 +443,73 @@ void wf_load_patch(char *filename) {
         *jumpsite = 0xe9; // call == 0xe9 OF OF OF OF
         *(int32_t*)(jumpsite + 1) = funcs[f].new_addr - 5 -funcs[f].old_addr;
         mprotect(page, pagesize, PROT_EXEC |PROT_READ);
+    }
 
+    // Relocations
+    for (unsigned r = 0; r < relocations_count; r++) {
+        struct kpatch_relocation *rela = &relocations[r];
+        struct kpatch_symbol *ksym = rela->ksym;
 
-        for (unsigned r = 0; r < relocations_count; r++) {
-            if (!(funcs[f].new_addr <= relocations[r].dest
-                  && relocations[r].dest <= (funcs[f].new_addr + funcs[f].new_size)))
-                continue;
+        log("  reloc: [%s/%s pos=%d, type=%d], external=%d, type=%d,   *%p\n",
+            ksym->objname, ksym->name, ksym->sympos, ksym->type,
+            rela->external, rela->type, rela->dest);
 
-            struct kpatch_relocation *rela = &relocations[r];
-            struct kpatch_symbol *ksym = rela->ksym;
-
-            log("  reloc: [%s/%s sympos=%d], external=%d, type=%d,   *%p\n",
-                ksym->objname, ksym->name, ksym->sympos,
-                rela->external, rela->type, rela->dest);
-
-            void *reloc_src;
-            if (rela->external) {
+        void *reloc_src;
+        if (rela->external) {
+            if (rela->type == R_X86_64_PLT32) {
                 if (ksym->sympos == 0) {
                     void *addr = dlsym(RTLD_DEFAULT, ksym->name);
                     if (!addr) die("Library symbol %s not found", ksym->name);
                     ksym->sympos = plt_idx++;
                     assert(ksym->sympos < plt_entries && "Too many relocations into library symbols in patch");
-                    plt[ksym->sympos].target = addr;
+
                     // jmp *%rip(-6)
+                    plt[ksym->sympos].target = addr;
                     plt[ksym->sympos].jmpq[0] = 0xff;
                     plt[ksym->sympos].jmpq[1] = 0x25;
                     *((uint32_t *)&plt[ksym->sympos].jmpq[2]) = -6 - 8;
+
                     log("  plt entry @ %p -> %p\n", &plt[ksym->sympos].jmpq, addr);
                 }
                 reloc_src = &plt[ksym->sympos].jmpq;
+            } else if (rela->type == R_X86_64_PC32) {
+                void *addr = dlsym(RTLD_DEFAULT, ksym->name);
+                reloc_src = (void**)addr;
             } else {
-                reloc_src = wf_find_symbol(ksym->name);
-                if (!reloc_src) {
-                    die("Could not find symbol %s in original binary",
-                        ksym->name);
-                }
+                die("Unsupported relocation type %d for library name %s\n",
+                    rela->type, ksym->name);
             }
-
-            void* loc;
-            uint64_t val;
-            char size;
-            
-            bool action = wf_relocate_calc(
-                rela->type,
-                (uintptr_t) reloc_src, rela->dest, rela->addend,
-                &loc, &val, &size
-            );
-            if (!action) continue;
-            // printf("%p %p %d\n", ksym_addr, rela->dest, rela->addend);
-            // printf("PATCH *%p[%d] = %d\n", loc, size, val);
-
-            if (size == 4) {
-                *(uint32_t *) loc = val;
-            } else if (size == 8) {
-                *(uint64_t *) loc = val;
-            } else
-                die("Invalid relocation size");
-
-            // Fixme OLD section
-
-            rela->dest = 0;
+        } else {
+            reloc_src = wf_find_symbol(ksym->name);
+            if (!reloc_src) {
+                die("Could not find symbol %s in original binary",
+                    ksym->name);
+            }
         }
+
+        void* loc;
+        uint64_t val;
+        char size;
+            
+        bool action = wf_relocate_calc(
+            rela->type,
+            (uintptr_t) reloc_src, rela->dest, rela->addend,
+            &loc, &val, &size
+            );
+        if (!action) continue;
+        // printf("%p %p %d\n", ksym_addr, rela->dest, rela->addend);
+        // printf("PATCH *%p[%d] = %d\n", loc, size, val);
+
+        if (size == 4) {
+            *(uint32_t *) loc = val;
+        } else if (size == 8) {
+            *(uint64_t *) loc = val;
+        } else
+            die("Invalid relocation size");
+
+        // Fixme OLD section
+
+        rela->dest = 0;
     }
 
     for (unsigned r = 0; r < relocations_count; r++) {

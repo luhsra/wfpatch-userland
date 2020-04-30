@@ -1,6 +1,13 @@
 0x00000000	//	vmlinux
 0x00000000	test1	obj1-old	EXPORT_SYMBOL
 0x00000000	test0	obj1-old	EXPORT_SYMBOL
+0x00000000	exchange	obj1-old	EXPORT_SYMBOL
 0x00000000	main	obj1-old	EXPORT_SYMBOL
 0x00000000	malloc	glibc    	EXPORT_SYMBOL
 0x00000000	free	glibc    	EXPORT_SYMBOL
+0x00000000	__errno_location	glibc    	EXPORT_SYMBOL
+0x00000000	stderr	glibc    	EXPORT_SYMBOL
+0x00000000	printf	glibc    	EXPORT_SYMBOL
+0x00000000	fwrite	glibc    	EXPORT_SYMBOL
+0x00000000	stdout	glibc    	EXPORT_SYMBOL
+0x00000000	fprintf	glibc    	EXPORT_SYMBOL

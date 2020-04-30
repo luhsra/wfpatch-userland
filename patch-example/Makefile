@@ -23,6 +23,9 @@ bin-new: obj1-new.o main.o obj2.o wf-userland.o
 %.o: %.c
 	gcc ${CFLAGS} -c -o $@ $<
 
+%.S: %.c
+	gcc ${CFLAGS} -S -o $@ $<
+
 create-diff-object:
 	${MAKE} -C ../kpatch/kpatch-build $@
 	ln -sf ../kpatch/kpatch-build/$@
