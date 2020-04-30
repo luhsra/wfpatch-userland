@@ -440,7 +440,7 @@ void wf_load_patch(char *filename) {
         
         if (rc == -1) die_perror("mprotect", "Callsite Patching\n");
         
-        *jumpsite = 0xe9; // call == 0xe9 OF OF OF OF
+        *jumpsite = 0xe9; // jmp == 0xe9 OF OF OF OF
         *(int32_t*)(jumpsite + 1) = funcs[f].new_addr - 5 -funcs[f].old_addr;
         mprotect(page, pagesize, PROT_EXEC |PROT_READ);
     }
@@ -692,7 +692,7 @@ static void wf_initiate_patching(void) {
     // Retrieve the current number of threads from the application,
     // otherwise, we rely on the thread_birth() and thread_death()
     // library calls.
-    if (wf_config.thread_count) {
+    if (!wf_config.track_threads) {
         int threads = wf_config.thread_count(wf_global);
         wf_existing_threads = threads;
     }
@@ -730,6 +730,9 @@ static void wf_initiate_patching(void) {
         wf_timepoint_dump(wf_time_start, wf_existing_threads);
         wf_log("- [quiescence, %.4f]\n",
                wf_time_global_quiescence - wf_time_start);
+
+        // FIMXE: Insert Patching 
+        // wf_load_patch("patch.o");
 
         wf_log("- [patched, %.4f]\n",
                wf_timestamp() - wf_time_start);
@@ -866,7 +869,6 @@ void wf_thread_death(char *name) {
 void wf_init(struct wf_configuration config) {
     wf_global = wf_config_get("WF_GLOBAL", 1);
     wf_load_symbols("/proc/self/exe");
-    wf_load_patch("patch.o");
 
     assert((config.track_threads
             || config.thread_count != NULL)
