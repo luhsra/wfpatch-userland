@@ -1,12 +1,12 @@
 .PHONY: all clean
 
-CFLAGS=-ffunction-sections -fdata-sections -D_GNU_SOURCE -g
-LDFLAGS=-lpthread
+CFLAGS=-ffunction-sections -fdata-sections  -g
+LDFLAGS=-lpthread -ldl
 
 all: patch.o
 
 patch.o: create-diff-object obj1-old.o obj1-new.o symtab Module.symvers
-	./create-diff-object obj1-old.o obj1-new.o xy symtab Module.symvers patch patch.o
+	./create-diff-object obj1-old.o obj1-new.o main symtab Module.symvers patch patch.o
 
 symtab: bin-old
 	readelf -s bin-old > symtab
