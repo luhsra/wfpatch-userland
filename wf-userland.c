@@ -14,6 +14,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <limits.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -543,6 +544,7 @@ static pthread_cond_t wf_cond_to_threads;
 
 static volatile int wf_target_generation;
 static __thread int wf_current_generation;
+static volatile int generation_id;
 
 static struct wf_configuration wf_config;
 
@@ -748,6 +750,7 @@ static void wf_initiate_patching(void) {
         fprintf(stderr, "[Global] ");
     } else if (wf_global == 0) {
         // FIXME: Insert Patching
+        generation_id = syscall(1000);
 
         wf_log("- [patched, %.4f]\n",
                wf_timestamp() - wf_time_start);
@@ -826,7 +829,7 @@ void wf_local_quiescence(char *name) {
             wf_current_generation = wf_target_generation;
             wf_timepoint(name, 1);
 
-            // FIXME: Call wf_migrate();
+            syscall(1001, generation_id);
 
             // Wakeup Patcher Threads
             pthread_mutex_lock(&wf_mutex_thread_count);
@@ -886,6 +889,12 @@ void wf_init(struct wf_configuration config) {
     } else {
         wf_log_file = stderr;
     }
+
+    // Pin code as non shared for AS generations
+    unsigned long start = (unsigned long)&__executable_start;
+    unsigned long end = ((unsigned long)&__etext + 4096-1) & (~(4096-1));
+    fprintf(stderr, "Patchable code range: %lx - %lx\n", start, end);
+    fprintf(stderr, "Pin patchable code (ret: %d)\n", syscall(1002, start, end - start));
 
     // We start a thread that does all the heavy lifting of address
     // space management
