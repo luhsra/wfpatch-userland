@@ -31,6 +31,41 @@
 
 
 ////////////////////////////////////////////////////////////////
+// Kernel Interface
+static unsigned pagesize;
+static void *addr_to_page(void *addr) {
+    if (pagesize == 0) {
+        pagesize = sysconf(_SC_PAGESIZE);
+    }
+    void *page = addr - ((uintptr_t) addr % pagesize);
+    return page;
+}
+
+int wf_kernel_pin(void* start, void* end) {
+    // Pin code as non shared for AS generations
+    uintptr_t start_page = (uintptr_t)addr_to_page(start);
+    uintptr_t end_page   = (uintptr_t)addr_to_page(end + pagesize - 1);
+
+    int rc = syscall(1002, start_page, end_page - start_page);
+    log("memory pin [%p:+0x%lx]: rc=%d\n", (void*)start_page,
+        end_page - start_page, rc);
+    return rc;
+}
+
+int wf_kernel_as_new(void) {
+    int rc = syscall(1000);
+    log("AS create: %d\n", rc);
+    return rc;
+}
+
+int wf_kernel_as_switch(int as_id) {
+    int rc = syscall(1001, as_id);
+    log("AS switch: %d %d\n", as_id, rc);
+    return rc;
+}
+
+
+////////////////////////////////////////////////////////////////
 // Apply Patch
 // Magic Names: ehdr, shstr
 #define offset_to_ptr(offset) (((void*) (ehdr)) + ((int) (offset)))
@@ -68,7 +103,7 @@ bool wf_relocate_calc(unsigned type,
         *size = 8;
         break;
     default:
-        die("Unsupported relocation %ld for source %s (0x%lx <- 0x%lx)\n",
+        die("Unsupported relocation %d for source (0x%lx <- 0x%lx)\n",
             type, reloc_dst, reloc_src);
     }
     return true;
@@ -124,7 +159,7 @@ void wf_relocate(Elf64_Ehdr *ehdr, void *elf_end, Elf64_Shdr* shdr) {
             }
         }
 
-        log("   %p+(%d) -> %p (%s)\n", reloc_dst, rela->r_addend, reloc_src, symbol_name);
+        // DEBUG: log("   %p+(%ld) -> %p (%s)\n", (void*)reloc_dst, rela->r_addend, reloc_src, symbol_name);
 
         void* loc;
         uint64_t val;
@@ -135,7 +170,7 @@ void wf_relocate(Elf64_Ehdr *ehdr, void *elf_end, Elf64_Shdr* shdr) {
         if (!action) continue;
 
         if (loc < (void*) ehdr || loc >= elf_end) {
-			die("bad relocation 0x%llx for symbol %s\n", loc, symbol_name);
+			die("bad relocation 0x%p for symbol %s\n", loc, symbol_name);
 		}
 
         // log("   *%p = 0x%lx [%d]\n", loc, val, size);
@@ -211,7 +246,7 @@ static void *wf_vspace_bump_ptr = NULL;
 void * wf_vspace_reservere(uintptr_t bytes) {
     uintptr_t size = ((bytes + 0xfff) & (~((uintptr_t) 0xfff)));
     wf_vspace_bump_ptr -= size;
-    printf("vspace %p (%x %x)\n", wf_vspace_bump_ptr, bytes, size);
+    printf("vspace %p (%lx %lx)\n", wf_vspace_bump_ptr, bytes, size);
     return wf_vspace_bump_ptr;
 }
 
@@ -229,7 +264,7 @@ static Elf64_Ehdr * wf_load_elf(char *filename, bool close_to_binary, void **elf
         hint = wf_vspace_reservere(size.st_size);
     }
     void *elf_start = mmap(hint, size.st_size, PROT_WRITE, MAP_PRIVATE, fd, 0);
-    if (elf_start == MAP_FAILED) die("mmap", "Could not map patch: %s", filename);
+    if (elf_start == MAP_FAILED) die_perror("mmap", "Could not map patch: %s", filename);
     *elf_end = elf_start + size.st_size;
 
     // 1. Find Tables
@@ -262,6 +297,7 @@ static int dl_iterate_cb_stop;
 static int
 dl_iterate_cb(struct dl_phdr_info *info, size_t size, void *data) {
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *) data;
+    // We only process the main binary
     if (dl_iterate_cb_stop) return 0;
     dl_iterate_cb_stop = 1;
 
@@ -285,7 +321,14 @@ dl_iterate_cb(struct dl_phdr_info *info, size_t size, void *data) {
     for (int j = 0; j < info->dlpi_phnum; j++) {
         const Elf64_Phdr *phdr = &info->dlpi_phdr[j];
         if (phdr->p_type != PT_LOAD) continue;
-        void *seg_vstart = (void *) (info->dlpi_addr + info->dlpi_phdr[j].p_vaddr);
+        void *seg_vstart = (void *) (info->dlpi_addr + phdr->p_vaddr);
+        void *seg_vend = seg_vstart + phdr->p_memsz;
+
+        if (phdr->p_flags & PF_X) { // Executable segment
+            wf_kernel_pin(seg_vstart, seg_vend);
+        }
+
+        
         // Initialize our patch bumping allocator before the actual binary. We need this space to
         if (wf_vspace_end == NULL) {
             wf_vspace_end = (void*) ((uintptr_t) seg_vstart & ~((uintptr_t) 0x1ff)) - 0x1000*1024;
@@ -350,17 +393,8 @@ void *wf_find_symbol(char * name) {
     return 0;
 }
 
-unsigned pagesize;
-void *addr_to_page(void *addr) {
-    if (pagesize == 0) {
-        pagesize = sysconf(_SC_PAGESIZE);
-    }
-    void *page = addr - ((uintptr_t) addr % pagesize);
-    return page;
-}
 
-
-void wf_load_patch(char *filename) {
+void wf_load_patch_from_file(char *filename) {
     void * elf_end;
     Elf64_Ehdr * ehdr = wf_load_elf(filename, /* close */ 1, &elf_end);
 
@@ -430,7 +464,7 @@ void wf_load_patch(char *filename) {
 
     for (unsigned f = 0; f < funcs_count; f++) {
         log ("kpatch_func: name:%s objname:%s new: %p\n",
-               funcs[f].name, funcs[f].objname, funcs[f].new_addr);
+             funcs[f].name, funcs[f].objname, (void*) funcs[f].new_addr);
 
         funcs[f].old_addr = (uintptr_t) wf_find_symbol(funcs[f].name);
         // printf("PATCH %p -> %p\n", funcs[f].old_addr, funcs[f].new_addr);
@@ -451,9 +485,9 @@ void wf_load_patch(char *filename) {
         struct kpatch_relocation *rela = &relocations[r];
         struct kpatch_symbol *ksym = rela->ksym;
 
-        log("  reloc: [%s/%s pos=%d, type=%d], external=%d, type=%d,   *%p\n",
+        log("  reloc: [%s/%s pos=%ld, type=%d], external=%d, type=%d,   *%p\n",
             ksym->objname, ksym->name, ksym->sympos, ksym->type,
-            rela->external, rela->type, rela->dest);
+            rela->external, rela->type, (void*)rela->dest);
 
         void *reloc_src;
         if (rela->external) {
@@ -491,7 +525,7 @@ void wf_load_patch(char *filename) {
         void* loc;
         uint64_t val;
         char size;
-            
+
         bool action = wf_relocate_calc(
             rela->type,
             (uintptr_t) reloc_src, rela->dest, rela->addend,
@@ -518,11 +552,16 @@ void wf_load_patch(char *filename) {
 
         printf("kpatch_relocation: name:%s/%s objname:%s type=%d, external=%d, *%p = ... (SHOULD NOT HAPPEN)\n",
                relocations[r].ksym->objname, relocations[r].ksym->name,
-               relocations[r].objname, relocations[r].type, relocations[r].external, relocations[r].dest);
+               relocations[r].objname, relocations[r].type, relocations[r].external,
+               (void *)relocations[r].dest);
         // Fixme OLD section
         assert(false && "All relocations should have been handleded above");
     }
 
+}
+
+void wf_load_patch(void) {
+    wf_load_patch_from_file("patch.o");
 }
 
 
@@ -733,8 +772,10 @@ static void wf_initiate_patching(void) {
         wf_log("- [quiescence, %.4f]\n",
                wf_time_global_quiescence - wf_time_start);
 
-        // FIMXE: Insert Patching 
-        // wf_load_patch("patch.o");
+
+        // Load and Apply the patch
+        wf_load_patch();
+
 
         wf_log("- [patched, %.4f]\n",
                wf_timestamp() - wf_time_start);
@@ -750,7 +791,12 @@ static void wf_initiate_patching(void) {
         fprintf(stderr, "[Global] ");
     } else if (wf_global == 0) {
         // FIXME: Insert Patching
-        generation_id = syscall(1000);
+        generation_id = wf_kernel_as_new();
+
+        wf_kernel_as_switch(generation_id);
+
+        // Load and Apply the patch
+        wf_load_patch();
 
         wf_log("- [patched, %.4f]\n",
                wf_timestamp() - wf_time_start);
@@ -829,7 +875,7 @@ void wf_local_quiescence(char *name) {
             wf_current_generation = wf_target_generation;
             wf_timepoint(name, 1);
 
-            syscall(1001, generation_id);
+            wf_kernel_as_switch(generation_id);
 
             // Wakeup Patcher Threads
             pthread_mutex_lock(&wf_mutex_thread_count);
@@ -889,12 +935,6 @@ void wf_init(struct wf_configuration config) {
     } else {
         wf_log_file = stderr;
     }
-
-    // Pin code as non shared for AS generations
-    unsigned long start = (unsigned long)&__executable_start;
-    unsigned long end = ((unsigned long)&__etext + 4096-1) & (~(4096-1));
-    fprintf(stderr, "Patchable code range: %lx - %lx\n", start, end);
-    fprintf(stderr, "Pin patchable code (ret: %d)\n", syscall(1002, start, end - start));
 
     // We start a thread that does all the heavy lifting of address
     // space management
