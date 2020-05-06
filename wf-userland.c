@@ -561,7 +561,7 @@ void wf_load_patch_from_file(char *filename) {
 }
 
 void wf_load_patch(void) {
-    wf_load_patch_from_file("patch.o");
+    // wf_load_patch_from_file("patch.o");
 }
 
 
