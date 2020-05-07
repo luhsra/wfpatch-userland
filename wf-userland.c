@@ -24,10 +24,34 @@
 
 #include "wf-userland.h"
 
+static struct wf_configuration wf_config;
 
 #define log(...) do { fprintf(stderr, "wf-userland: "__VA_ARGS__); } while(0)
 #define die(...) do { log("[ERROR] " __VA_ARGS__); exit(EXIT_FAILURE); } while(0)
 #define die_perror(m, ...) do { perror(m); die(__VA_ARGS__); } while(0)
+
+static FILE *wf_log_file;
+static void wf_log(char *fmt, ...) {
+    if (wf_log_file) {
+        va_list(args);
+        va_start(args, fmt);
+        vfprintf(wf_log_file, fmt, args);
+        fflush(wf_log_file);
+    }
+}
+
+// Returns the a timestamp in miliseconds. The first call zeroes the clock
+static struct timespec wf_ts0;
+static void wf_timestamp_reset(void) { // returns 0 seconds first time called
+    clock_gettime(CLOCK_REALTIME, &wf_ts0);
+}
+
+static double wf_timestamp(void) { // returns 0 seconds first time called
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (ts.tv_sec - wf_ts0.tv_sec)*1000. + (ts.tv_nsec - wf_ts0.tv_nsec) / 1000000.;
+}
+
 
 
 ////////////////////////////////////////////////////////////////
@@ -256,7 +280,7 @@ static Elf64_Ehdr * wf_load_elf(char *filename, bool close_to_binary, void **elf
 
     // Mapt the whole file
     struct stat size;
-    if (fstat(fd, &size) == -1) die_perror("fstat", "Could not determine size: %s", filename);
+    if (fstat(fd, &size) == -1) die_perror("fstat", "Could not determine size: %s\n", filename);
 
     void *hint = 0;
     if (close_to_binary) {
@@ -561,21 +585,36 @@ void wf_load_patch_from_file(char *filename) {
 
 char *wf_patch_queue = NULL;
 
-char * wf_find_patch(void) {
+bool wf_load_patch(void) {
     char *patch = NULL;
+    
     if (wf_patch_queue && *wf_patch_queue) {
-        patch = wf_patch_queue;
-        char *comma = strchr(patch, ',');
-        if (comma) {
-            *comma = '\0';
-            wf_patch_queue = comma + 1;
-        } else {
-            wf_patch_queue = NULL;
-        }
-        log("loading patch from queue: %s\n", patch);
-    }
+        char *patch_stack = wf_patch_queue;
+        char *p = strchr(wf_patch_queue, ';');
+        if (p) { *p = 0; wf_patch_queue = p + 1;}
+        else   { wf_patch_queue = 0; };
 
-    return patch;
+        char *patch_stack_cpy = strdup(patch_stack);
+        log("applying patch: %s\n", patch_stack);
+        char *saveptr = NULL;
+        char *patch;
+        p = patch_stack;
+        while (patch = strtok_r(p, ",", &saveptr)){
+            p = NULL;
+            log("loading patch: %s\n", patch);
+            wf_load_patch_from_file(patch);
+        }
+
+        wf_log("- [patched, %.4f, \"%s\"]\n",
+               wf_timestamp(),patch_stack_cpy);
+        free(patch_stack_cpy);
+
+        if (wf_config.patch_applied)
+            wf_config.patch_applied();
+
+        return true;
+    }
+    return false;
 }
 
 
@@ -599,7 +638,7 @@ static volatile int wf_target_generation;
 static __thread int wf_current_generation;
 static volatile int generation_id;
 
-static struct wf_configuration wf_config;
+
 
 static void wf_initiate_patching(void);
 
@@ -615,18 +654,6 @@ static int wf_config_get(char * name, int default_value) {
     ret = strtol(env, &ptr, 10);
     if (!ptr || *ptr != '\0') die("invalid env config %s: %s", name, env);
     return (int) ret;
-}
-
-// Returns the a timestamp in miliseconds. The first call zeroes the clock
-static struct timespec wf_ts0;
-static void wf_timestamp_reset(void) { // returns 0 seconds first time called
-    clock_gettime(CLOCK_REALTIME, &wf_ts0);
-}
-
-static double wf_timestamp(void) { // returns 0 seconds first time called
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (ts.tv_sec - wf_ts0.tv_sec)*1000. + (ts.tv_nsec - wf_ts0.tv_nsec) / 1000000.;
 }
 
 
@@ -696,15 +723,6 @@ int wf_timepoint(char *name, unsigned int threads) {
 }
 
 
-static FILE *wf_log_file;
-static void wf_log(char *fmt, ...) {
-    if (wf_log_file) {
-        va_list(args);
-        va_start(args, fmt);
-        vfprintf(wf_log_file, fmt, args);
-        fflush(wf_log_file);
-    }
-}
 
 static
 void wf_timepoint_dump() {
@@ -785,18 +803,8 @@ static void wf_initiate_patching(void) {
 
 
         // Load and Apply the patch
-        char *patch  = wf_find_patch();
-        if (patch) {
-            wf_load_patch_from_file(patch);
-        } else {
-            log("no patch available\n");
-        }
+        wf_load_patch();
 
-        wf_log("- [patched, %.4f, \"%s\"]\n",
-               wf_timestamp(), patch ? patch : "");
-
-        if (wf_config.patch_applied)
-            wf_config.patch_applied();
         ////////////////////////////////////////////////////////////////
         // Let's leave the global quiescence point
         pthread_cond_broadcast(&wf_cond_to_threads); // Wakeup all sleeping threads
@@ -809,16 +817,8 @@ static void wf_initiate_patching(void) {
         wf_kernel_as_switch(generation_id);
 
         // Load and Apply the patch
-        char *patch  = wf_find_patch();
-        if (patch) {
-            wf_load_patch_from_file(patch);
-        } else {
-            log("no patch available\n");
-        }
+        wf_load_patch();
 
-        wf_log("- [patched, %.4f, \"%s\"]\n",
-               wf_timestamp(),
-               patch ? patch : "");
 
         ////////////////////////////////////////////////////////////////
         wf_target_generation ++;

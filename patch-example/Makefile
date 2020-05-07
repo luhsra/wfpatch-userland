@@ -3,18 +3,21 @@
 CFLAGS=-ffunction-sections -fdata-sections  -g
 LDFLAGS=-lpthread -ldl
 
-all: patch.o
+all: patch-obj1.o patch-obj2.o
 
-patch.o: create-diff-object obj1-old.o obj1-new.o symtab
-	./create-diff-object obj1-old.o obj1-new.o main symtab "IGNORED" patch patch.o
+patch-obj1.o: bin-old obj1-old.o obj1-new.o
+	../create-patch bin-old --obj obj1-old.o obj1-new.o
 
-symtab: bin-old
-	readelf -s bin-old > symtab
+patch-obj2.o: bin-old obj2-old.o obj2-new.o
+	../create-patch bin-old --obj obj2-old.o obj2-new.o
 
-bin-old: obj1-old.o main.o obj2.o wf-userland.o
+run: bin-old patch-obj1.o
+	WF_PATCH_QUEUE="patch-obj1.o;patch-obj2.o" ./bin-old
+
+bin-old: obj1-old.o main.o obj2-old.o wf-userland.o
 	gcc -o $@ $^ ${LDFLAGS}
 
-bin-new: obj1-new.o main.o obj2.o wf-userland.o
+bin-new: obj1-new.o main.o obj2-new.o wf-userland.o
 	gcc -o $@ $^ ${LDFLAGS}
 
 %.o: %.c

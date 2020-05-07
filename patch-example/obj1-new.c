@@ -17,7 +17,7 @@ int test1(int x, int y) {
 static int static_var;
 
 static int static_func(int a) {
-    printf("static(%d)", a + static_var + 1);
+    printf("STATIC(%d)", a + static_var + 1);
     return a;
 }
 
