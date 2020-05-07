@@ -14,8 +14,10 @@ int test1(int x, int y) {
     return x + y + test3() * test3() + test4(y);
 }
 
+static int static_var;
+
 static int static_func(int a) {
-    printf("static(%d)", a);
+    printf("static(%d)", a + static_var + 1);
     return a;
 }
 

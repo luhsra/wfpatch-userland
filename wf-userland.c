@@ -153,13 +153,12 @@ void wf_relocate(Elf64_Ehdr *ehdr, void *elf_end, Elf64_Shdr* shdr) {
             // Find Name in original binary
             reloc_src = wf_find_symbol(symbol_name);
             if (!reloc_src) {
-                log("Probaly `%s' is a library function. In order to wf-userland to work correctly, "
-                    "library functions have to be included in Module.symvers\n", symbol_name);
+                log("Probaly `%s' is a library function that was not called in original binary. We do not support this yet.\n", symbol_name);
                 die("Could not find symbol %s.\n", symbol_name);
             }
         }
 
-        // DEBUG: log("   %p+(%ld) -> %p (%s)\n", (void*)reloc_dst, rela->r_addend, reloc_src, symbol_name);
+        log("   %p+(%ld) -> %p (%s)\n", (void*)reloc_dst, rela->r_addend, reloc_src, symbol_name);
 
         void* loc;
         uint64_t val;
@@ -246,7 +245,7 @@ static void *wf_vspace_bump_ptr = NULL;
 void * wf_vspace_reservere(uintptr_t bytes) {
     uintptr_t size = ((bytes + 0xfff) & (~((uintptr_t) 0xfff)));
     wf_vspace_bump_ptr -= size;
-    printf("vspace %p (%lx %lx)\n", wf_vspace_bump_ptr, bytes, size);
+    log("vspace %p (%lx %lx)\n", wf_vspace_bump_ptr, bytes, size);
     return wf_vspace_bump_ptr;
 }
 
@@ -317,7 +316,7 @@ dl_iterate_cb(struct dl_phdr_info *info, size_t size, void *data) {
     wf_symbols = malloc(sizeof(struct wf_symbol) * symbols_max);
     if (!wf_symbols) die_perror("malloc", "could not allocate space for symbols");
 
-    // Iterate over loaded Segments
+    // Pin all the executable sections
     for (int j = 0; j < info->dlpi_phnum; j++) {
         const Elf64_Phdr *phdr = &info->dlpi_phdr[j];
         if (phdr->p_type != PT_LOAD) continue;
@@ -327,45 +326,37 @@ dl_iterate_cb(struct dl_phdr_info *info, size_t size, void *data) {
         if (phdr->p_flags & PF_X) { // Executable segment
             wf_kernel_pin(seg_vstart, seg_vend);
         }
+    }
 
-        
-        // Initialize our patch bumping allocator before the actual binary. We need this space to
-        if (wf_vspace_end == NULL) {
-            wf_vspace_end = (void*) ((uintptr_t) seg_vstart & ~((uintptr_t) 0x1ff)) - 0x1000*1024;
-            assert(((uintptr_t)wf_vspace_end & 0x1ff) == 0 && "Not page alinged");
-            wf_vspace_bump_ptr = wf_vspace_end;
-        }
+    // Initialize our patch bumping allocator before the actual
+    // binary. We need this space to allocate PLT entries
+    wf_vspace_end = (void*) ((uintptr_t) info->dlpi_addr & ~((uintptr_t) 0x1ff)) - 0x1000*1024;
+    assert(((uintptr_t)wf_vspace_end & 0x1ff) == 0 && "Not page alinged");
+    wf_vspace_bump_ptr = wf_vspace_end;
 
-        // Find all Symbols in ELF that are in this segment
-        for (unsigned i = 0; i < ehdr->e_shnum; i++) {
-            Elf64_Shdr * shdr = shdr_from_idx(i);
-            if (shdr->sh_type == SHT_SYMTAB) {
-                Elf64_Sym *symbol_table = offset_to_ptr(shdr->sh_offset);
-                unsigned  symbol_count = shdr->sh_size / shdr->sh_entsize;
+    // Find all Symbols in ELF
+    for (unsigned i = 0; i < ehdr->e_shnum; i++) {
+        Elf64_Shdr * shdr = shdr_from_idx(i);
+        if (shdr->sh_type == SHT_SYMTAB) {
+            Elf64_Sym *symbol_table = offset_to_ptr(shdr->sh_offset);
+            unsigned  symbol_count = shdr->sh_size / shdr->sh_entsize;
 
-                Elf64_Shdr *shdr_strtab = shdr_from_idx(shdr->sh_link);
-                char *strtab = offset_to_ptr(shdr_strtab->sh_offset);
+            Elf64_Shdr *shdr_strtab = shdr_from_idx(shdr->sh_link);
+            char *strtab = offset_to_ptr(shdr_strtab->sh_offset);
 
-                for (unsigned s = 0; s < symbol_count; s++) {
-                    int sym_type = ELF32_ST_TYPE(symbol_table[s].st_info);
-                    if (sym_type != STT_FUNC && sym_type != STT_OBJECT)
-                        continue;
+            for (unsigned s = 0; s < symbol_count; s++) {
+                int sym_type = ELF32_ST_TYPE(symbol_table[s].st_info);
+                if (sym_type != STT_FUNC && sym_type != STT_OBJECT)
+                    continue;
 
-                    unsigned sym_offset = symbol_table[s].st_value;
-                    if (phdr->p_offset <= sym_offset
-                        && sym_offset < phdr->p_offset + phdr->p_filesz) {
+                char *sym_name = strtab + symbol_table[s].st_name;
+                ptrdiff_t sym_value = symbol_table[s].st_value;
+                void *sym_addr = (void*)info->dlpi_addr + sym_value;
 
-                        unsigned offset_in_segment = sym_offset - phdr->p_offset;
-                        void *sym_addr = seg_vstart + offset_in_segment;
-                        
-                        char *name = strtab + symbol_table[s].st_name;
-
-                        wf_symbols[wf_symbol_count].name = strdup(name);
-                        wf_symbols[wf_symbol_count].addr = sym_addr;
-                        wf_symbol_count += 1;
-                        // printf("found %s @ %p \n", name, sym_addr);
-                    }
-                }
+                wf_symbols[wf_symbol_count].name = strdup(sym_name);
+                wf_symbols[wf_symbol_count].addr = sym_addr;
+                wf_symbol_count += 1;
+                log("found %s @ %p (+0x%lx)\n", sym_name, sym_addr, sym_value);
             }
         }
     }
@@ -509,20 +500,23 @@ void wf_load_patch_from_file(char *filename) {
                     plt[ksym->sympos].jmpq[1] = 0x25;
                     *((uint32_t *)&plt[ksym->sympos].jmpq[2]) = -6 - 8;
 
-                    log("  plt entry %s @ %p -> %p\n", ksym->name, &plt[ksym->sympos].jmpq, addr);
+                    log("    DL func %s == %p\n", ksym->name, addr);
                 }
                 reloc_src = &plt[ksym->sympos].jmpq;
+
             } else if (rela->type == R_X86_64_PC32) {
                 void *addr = dlsym(RTLD_DEFAULT, ksym->name);
                 reloc_src = (void**)addr;
+                log("    DL var %s == %p\n", ksym->name, reloc_src);
             } else {
                 die("Unsupported relocation type %d for library name %s\n",
                     rela->type, ksym->name);
             }
         } else {
             reloc_src = wf_find_symbol(ksym->name);
+            log("    local %s == %p\n", ksym->name, reloc_src);
             if (!reloc_src) {
-                die("Could not find symbol %s in original binary",
+                die("Could not find symbol %s in original binary\n",
                     ksym->name);
             }
         }
@@ -578,7 +572,7 @@ char * wf_find_patch(void) {
         } else {
             wf_patch_queue = NULL;
         }
-        log("loading patch from queue: %s", patch);
+        log("loading patch from queue: %s\n", patch);
     }
 
     return patch;
@@ -713,11 +707,11 @@ static void wf_log(char *fmt, ...) {
 }
 
 static
-void wf_timepoint_dump(int wf_time_start, int threads) {
-    for (unsigned int i = 0; i < threads; i++){
+void wf_timepoint_dump() {
+    for (unsigned int i = 0; i < wf_timepoints_idx; i++){
         wf_log("- [migrated, \"%s\", %.4f, %d]\n",
                wf_timepoints[i].name,
-               wf_timepoints[i].timestamp - wf_time_start,
+               wf_timepoints[i].timestamp,
                wf_timepoints[i].threads
            );
     }
@@ -745,7 +739,6 @@ static void wf_initiate_patching(void) {
     else wf_log("---\n");
     // Reset the time
     wf_timestamp_reset();
-    double wf_time_start = 0.0;
 
     pthread_mutex_lock(&wf_mutex_thread_count);
     // Retrieve the current number of threads from the application,
@@ -786,9 +779,9 @@ static void wf_initiate_patching(void) {
         ////////////////////////////////////////////////////////////////
         double wf_time_global_quiescence = wf_timestamp();
 
-        wf_timepoint_dump(wf_time_start, wf_existing_threads);
+        wf_timepoint_dump(wf_existing_threads);
         wf_log("- [quiescence, %.4f]\n",
-               wf_time_global_quiescence - wf_time_start);
+               wf_time_global_quiescence);
 
 
         // Load and Apply the patch
@@ -800,8 +793,7 @@ static void wf_initiate_patching(void) {
         }
 
         wf_log("- [patched, %.4f, \"%s\"]\n",
-               wf_timestamp() - wf_time_start,
-               patch ? patch : "");
+               wf_timestamp(), patch ? patch : "");
 
         if (wf_config.patch_applied)
             wf_config.patch_applied();
@@ -825,7 +817,7 @@ static void wf_initiate_patching(void) {
         }
 
         wf_log("- [patched, %.4f, \"%s\"]\n",
-               wf_timestamp() - wf_time_start,
+               wf_timestamp(),
                patch ? patch : "");
 
         ////////////////////////////////////////////////////////////////
@@ -841,7 +833,7 @@ static void wf_initiate_patching(void) {
 
         double wf_time_migrated = wf_timestamp();
 
-        wf_timepoint_dump(wf_time_start, wf_existing_threads);
+        wf_timepoint_dump();
 
         pthread_mutex_unlock(&wf_mutex_thread_count);
     } else {
@@ -853,16 +845,14 @@ static void wf_initiate_patching(void) {
     wf_state = IDLE;
 
     double wf_time_end = wf_timestamp();
-    wf_log("- [finished, %.4f]\n",
-            wf_time_end - wf_time_start
-    );
+    wf_log("- [finished, %.4f]\n", wf_time_end);
 
     log("%s Migration %d in %.4f\n",
         wf_global > 0 ? "Global" : (
             wf_global == 0 ? "Local" : (
                 "No")),
         wf_target_generation,
-        wf_time_end - wf_time_start
+        wf_time_end
     );
 
 
@@ -924,6 +914,9 @@ void wf_thread_birth(char *name) {
     wf_existing_threads += 1;
     pthread_mutex_unlock(&wf_mutex_thread_count);
 
+    if (wf_state != IDLE)
+        wf_log("- [birth, %.2f, \"%s\"]\n", wf_timestamp(), name);
+
     // Birth is a point of Quiesence
     wf_global_quiescence(name, 1);
 }
@@ -931,11 +924,12 @@ void wf_thread_birth(char *name) {
 void wf_thread_death(char *name) {
     assert(wf_config.track_threads
            && "You are not allowed to call wf_thread_death() with track_threads=0");
-    
+
     pthread_mutex_lock(&wf_mutex_thread_count);
     wf_existing_threads -= 1;
     // Wakeup pather thread in case we were the last thread.
     if (wf_state == LOCAL_QUIESCENCE || wf_state == GLOBAL_QUIESCENCE){
+        wf_log("- [death, %.2f, \"%s\"]\n", wf_timestamp(), name);
         if (wf_migrated_threads == wf_existing_threads) {
             pthread_cond_signal(&wf_cond_from_threads);
         }
@@ -977,4 +971,3 @@ void wf_init(struct wf_configuration config) {
 
     pthread_setname_np(wf_patch_thread, "patcher");
 }
-

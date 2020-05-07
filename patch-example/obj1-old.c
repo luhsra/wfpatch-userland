@@ -7,8 +7,10 @@ int test1(int x, int y) {
     return x + y + test3();
 }
 
+static int static_var;
+
 static int static_func(int a) {
-    printf("static(%d)", a);
+    printf("static(%d)", a + static_var);
     return a;
 }
 
@@ -17,6 +19,8 @@ int test0(int base, int len) {
         int ret = test1(base, i);
         printf("> %d\n", static_func(ret));
     }
+
+    static_var = 10;
 }
 
 
