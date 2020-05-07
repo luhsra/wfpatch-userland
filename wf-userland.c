@@ -480,6 +480,11 @@ void wf_load_patch_from_file(char *filename) {
         mprotect(page, pagesize, PROT_EXEC |PROT_READ);
     }
 
+    // We know that ksyms are duplicated.
+    // for (unsigned k = 0; k < symbols_count; k++) {
+    //     printf("ksym: %s\n", symbols[k].name);
+    // }
+
     // Relocations
     for (unsigned r = 0; r < relocations_count; r++) {
         struct kpatch_relocation *rela = &relocations[r];
@@ -504,7 +509,7 @@ void wf_load_patch_from_file(char *filename) {
                     plt[ksym->sympos].jmpq[1] = 0x25;
                     *((uint32_t *)&plt[ksym->sympos].jmpq[2]) = -6 - 8;
 
-                    log("  plt entry @ %p -> %p\n", &plt[ksym->sympos].jmpq, addr);
+                    log("  plt entry %s @ %p -> %p\n", ksym->name, &plt[ksym->sympos].jmpq, addr);
                 }
                 reloc_src = &plt[ksym->sympos].jmpq;
             } else if (rela->type == R_X86_64_PC32) {
@@ -560,8 +565,23 @@ void wf_load_patch_from_file(char *filename) {
 
 }
 
-void wf_load_patch(void) {
-    // wf_load_patch_from_file("patch.o");
+char *wf_patch_queue = NULL;
+
+char * wf_find_patch(void) {
+    char *patch = NULL;
+    if (wf_patch_queue && *wf_patch_queue) {
+        patch = wf_patch_queue;
+        char *comma = strchr(patch, ',');
+        if (comma) {
+            *comma = '\0';
+            wf_patch_queue = comma + 1;
+        } else {
+            wf_patch_queue = NULL;
+        }
+        log("loading patch from queue: %s", patch);
+    }
+
+    return patch;
 }
 
 
@@ -591,7 +611,6 @@ static void wf_initiate_patching(void);
 
 static void wf_sigpatch_handler(int sig) {
     pthread_cond_signal(&wf_cond_initiate);
-    printf("signal\n");
 }
 
 static int wf_config_get(char * name, int default_value) {
@@ -644,7 +663,7 @@ static void* wf_patch_thread_entry(void *arg) {
         } else {
             // FIXME: We use this for benchmarking
             if (bound > 0 && wf_target_generation >= bound) {
-                fprintf(stderr, "Cyclic test was OK\n");
+                log("Cyclic test was OK\n");
                 _exit(0);
             }
             struct timespec ts;
@@ -670,7 +689,6 @@ volatile unsigned int wf_timepoints_idx;
 
 int wf_timepoint(char *name, unsigned int threads) {
     assert (wf_timepoints != NULL);
-    // printf("%s %d\n", name, wf_timestamp());
 
     int idx = __atomic_fetch_add(&wf_timepoints_idx, 1, __ATOMIC_SEQ_CST);
     time_thread_point_t x = {
@@ -774,11 +792,16 @@ static void wf_initiate_patching(void) {
 
 
         // Load and Apply the patch
-        wf_load_patch();
+        char *patch  = wf_find_patch();
+        if (patch) {
+            wf_load_patch_from_file(patch);
+        } else {
+            log("no patch available\n");
+        }
 
-
-        wf_log("- [patched, %.4f]\n",
-               wf_timestamp() - wf_time_start);
+        wf_log("- [patched, %.4f, \"%s\"]\n",
+               wf_timestamp() - wf_time_start,
+               patch ? patch : "");
 
         if (wf_config.patch_applied)
             wf_config.patch_applied();
@@ -787,8 +810,6 @@ static void wf_initiate_patching(void) {
         pthread_cond_broadcast(&wf_cond_to_threads); // Wakeup all sleeping threads
         pthread_mutex_unlock(&wf_mutex_thread_count);
         ////////////////////////////////////////////////////////////////
-
-        fprintf(stderr, "[Global] ");
     } else if (wf_global == 0) {
         // FIXME: Insert Patching
         generation_id = wf_kernel_as_new();
@@ -796,10 +817,16 @@ static void wf_initiate_patching(void) {
         wf_kernel_as_switch(generation_id);
 
         // Load and Apply the patch
-        wf_load_patch();
+        char *patch  = wf_find_patch();
+        if (patch) {
+            wf_load_patch_from_file(patch);
+        } else {
+            log("no patch available\n");
+        }
 
-        wf_log("- [patched, %.4f]\n",
-               wf_timestamp() - wf_time_start);
+        wf_log("- [patched, %.4f, \"%s\"]\n",
+               wf_timestamp() - wf_time_start,
+               patch ? patch : "");
 
         ////////////////////////////////////////////////////////////////
         wf_target_generation ++;
@@ -817,12 +844,10 @@ static void wf_initiate_patching(void) {
         wf_timepoint_dump(wf_time_start, wf_existing_threads);
 
         pthread_mutex_unlock(&wf_mutex_thread_count);
-        fprintf(stderr, "[Local] ");
     } else {
         pthread_mutex_unlock(&wf_mutex_thread_count);
         /* WF_GLOBAL < 0 */
         wf_target_generation ++;
-        fprintf(stderr, "[No] ");
     }
 
     wf_state = IDLE;
@@ -832,10 +857,13 @@ static void wf_initiate_patching(void) {
             wf_time_end - wf_time_start
     );
 
-    fprintf(stderr, "Migration %d in %.4f\n",
-            wf_target_generation,
-            wf_time_end - wf_time_start
-        );
+    log("%s Migration %d in %.4f\n",
+        wf_global > 0 ? "Global" : (
+            wf_global == 0 ? "Local" : (
+                "No")),
+        wf_target_generation,
+        wf_time_end - wf_time_start
+    );
 
 
     // Must be called in all circumstances as thread count could take
@@ -935,6 +963,10 @@ void wf_init(struct wf_configuration config) {
     } else {
         wf_log_file = stderr;
     }
+
+    // Load the patch queue, if possible
+    char *queue = getenv("WF_PATCH_QUEUE");
+    if (queue) wf_patch_queue = strdup(queue);
 
     // We start a thread that does all the heavy lifting of address
     // space management
