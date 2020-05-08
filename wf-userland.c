@@ -115,6 +115,7 @@ bool wf_relocate_calc(unsigned type,
     case R_X86_64_PC32:
     case R_X86_64_PLT32:
     case R_X86_64_GOTPCREL:
+    case R_X86_64_REX_GOTPCRELX:
         *val = (uint64_t)(S + A - P);
         assert(is_pc32_rel(*val) && "Patch was loaded tooo far away");
         *size = 4;
@@ -550,7 +551,7 @@ void wf_load_patch_from_file(char *filename) {
                 ksym->sympos = (uintptr_t)&plt->jmpq;
             }
             reloc_src = ksym->sympos;
-        } else if (rela->type == R_X86_64_GOTPCREL) {
+        } else if (rela->type == R_X86_64_GOTPCREL || rela->type == R_X86_64_REX_GOTPCRELX) {
             if (ksym->sympos == 0) {
                 struct got_entry {
                     void *target;
