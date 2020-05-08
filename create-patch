@@ -9,15 +9,16 @@ logging.basicConfig(level=logging.DEBUG)
 def symtab(elf):
     d = tempfile.NamedTemporaryFile()
     logging.info("reading symtab of %s", elf)
-    subprocess.check_call(['readelf', '-s', elf],
+    subprocess.check_call(['readelf', '-s', "--wide", elf],
                             stdout = d)
     return d
 
 def diff_obj(args, symtab, old, new):
-    name = os.path.commonprefix([old, new]).rstrip("-_.")
+    names = [os.path.basename(x) for x in (old, new)]
+    name = os.path.commonprefix(names).rstrip("-_.")
     patch_file = args.prefix + name + ".o"
-    cmd = ['create-diff-object', old, new, 'main', symtab, "IGNORED", name, patch_file]
-    logging.info("Create Patch: %s", cmd)
+    cmd = [args.create_diff_object, old, new, 'main', symtab, "IGNORED", name, patch_file]
+    logging.info("Create Patch: %s", " ".join(cmd))
     subprocess.check_call(cmd)
     return patch_file
 
@@ -30,6 +31,8 @@ if __name__ == "__main__":
                         help="Pair of old and new binary")
     parser.add_argument("--prefix", "-p", default="patch-",
                         help="What prefix should be used for the patch objects")
+    parser.add_argument("--create-diff-object", default="create-diff-object",
+                        help="Path to create-diff-object")
     args = parser.parse_args(sys.argv[1:])
 
     symbols = symtab(args.elf)
