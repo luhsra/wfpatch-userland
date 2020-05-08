@@ -380,7 +380,7 @@ dl_iterate_cb(struct dl_phdr_info *info, size_t size, void *data) {
                 wf_symbols[wf_symbol_count].name = strdup(sym_name);
                 wf_symbols[wf_symbol_count].addr = sym_addr;
                 wf_symbol_count += 1;
-                log("found %s @ %p (+0x%lx)\n", sym_name, sym_addr, sym_value);
+                // log("found %s @ %p (+0x%lx)\n", sym_name, sym_addr, sym_value);
             }
         }
     }
