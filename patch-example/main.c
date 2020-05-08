@@ -5,7 +5,10 @@ int foo() {
     stderr = stdout;
 }
 
+int global_var;
+
 int main(void) {
+    global_var = 23;
     struct wf_configuration config = {0};
     config.track_threads = true;
     wf_init(config);

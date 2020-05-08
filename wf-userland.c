@@ -96,34 +96,39 @@ int wf_kernel_as_switch(int as_id) {
 #define shdr_from_idx(idx) offset_to_ptr(ehdr->e_shoff + ehdr->e_shentsize * idx);
 #define section_name(shdr) (((char*) offset_to_ptr(shstr->sh_offset)) + shdr->sh_name)
 
+extern void *_GLOBAL_OFFSET_TABLE_;
 
 bool wf_relocate_calc(unsigned type,
                         /* input */  uintptr_t reloc_src, uintptr_t reloc_dst, uintptr_t reloc_addend,
                         /* output */ void **loc, uint64_t *val, char *size) {
 
+    uintptr_t S = reloc_src, A = reloc_addend, P = reloc_dst;
+
+    uintptr_t GOT = (uintptr_t) &_GLOBAL_OFFSET_TABLE_;
+
+#define is_pc32_rel(x) ((INT_MIN <= (intptr_t) (x)) && ((intptr_t) (x) <= INT_MAX))
+
+    *loc = (void*) reloc_dst;
     switch (type) {
     case R_X86_64_NONE:
         return false;
     case R_X86_64_PC32:
     case R_X86_64_PLT32:
-        *loc = (void*) reloc_dst;
-        *val = (uint64_t)((intptr_t)reloc_src + (ptrdiff_t) reloc_addend - (intptr_t) reloc_dst);
-        assert((INT_MIN <= (intptr_t) *val) && ((intptr_t) *val <= INT_MAX) && "Patch was loaded tooo far away");
+    case R_X86_64_GOTPCREL:
+        *val = (uint64_t)(S + A - P);
+        assert(is_pc32_rel(*val) && "Patch was loaded tooo far away");
         *size = 4;
         break;
     case R_X86_64_32S:
-        *loc = (void*) reloc_dst;
-        *val = (uint64_t)((int32_t)reloc_src + reloc_addend);
+        *val = (uint64_t)((int32_t)S + A);
         *size = 4;
         break;
     case R_X86_64_32:
-        *loc = (void*) reloc_dst;
-        *val = (uint64_t)((uint32_t)reloc_src + reloc_addend);
+        *val = (uint64_t)((uint32_t)S + A);
         *size = 4;
         break;
     case R_X86_64_64:
-        *loc = (void*) reloc_dst;
-        *val = (uint64_t) reloc_src + reloc_addend;
+        *val = (uint64_t) S + A;
         *size = 8;
         break;
     default:
@@ -408,6 +413,27 @@ void *wf_find_symbol(char * name) {
     return 0;
 }
 
+static int wf_malloc_space = 0;
+static void *wf_malloc_ptr = 0;
+
+void *wf_malloc_near(unsigned char size) {
+    if (wf_malloc_space < size) {
+        wf_malloc_ptr = wf_vspace_reservere(4096);
+        {
+            void *x = mmap(wf_malloc_ptr, 4096,
+                           PROT_READ | PROT_WRITE | PROT_EXEC,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (x != wf_malloc_ptr) die_perror("mmap", "wf_malloc_near\n");
+        }
+        wf_malloc_space = 4096;
+    }
+
+    void * ret = wf_malloc_ptr;
+    wf_malloc_ptr   += size;
+    wf_malloc_space -= size;
+    return ret;
+}
+
 
 void wf_load_patch_from_file(char *filename) {
     void * elf_end;
@@ -415,24 +441,6 @@ void wf_load_patch_from_file(char *filename) {
 
     int rc = mprotect(ehdr, elf_end - (void*)ehdr, PROT_WRITE | PROT_EXEC | PROT_READ);
     if (rc == -1) die_perror("mprotect", "Could not mprotect patch");
-
-
-    // Allocate space for trampolines
-    struct plt_entry {
-        void *target;
-        char jmpq[6];
-    };
-    // FIXME: Crashes if the number of relocations per patch exceeds 4096 bytes
-    unsigned plt_entries = 250;
-    unsigned plt_size = sizeof(struct plt_entry) * 250;
-    unsigned plt_idx = 1; // 1 is on purpose
-    struct plt_entry* plt = wf_vspace_reservere(plt_size);
-    {
-        void *x = mmap(plt, plt_size,
-                       PROT_READ | PROT_WRITE | PROT_EXEC,
-                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (x != plt) die_perror("mmap", "trampoline allocation failed\n");
-    }
 
 
     Elf64_Shdr *shstr = shdr_from_idx(ehdr->e_shstrndx);
@@ -505,37 +513,15 @@ void wf_load_patch_from_file(char *filename) {
         struct kpatch_relocation *rela = &relocations[r];
         struct kpatch_symbol *ksym = rela->ksym;
 
-        log("  reloc: [%s/%s pos=%ld, type=%d], external=%d, type=%d,   *%p\n",
+        log("  reloc: [%s/%s pos=%ld, type=%d], ext=%d, type=%d, add=%d *%p\n",
             ksym->objname, ksym->name, ksym->sympos, ksym->type,
-            rela->external, rela->type, (void*)rela->dest);
+            rela->external, rela->type, rela->addend, (void*)rela->dest);
 
-        void *reloc_src;
+        uintptr_t reloc_src;
         if (rela->external) {
-            if (rela->type == R_X86_64_PLT32) {
-                if (ksym->sympos == 0) {
-                    void *addr = dlsym(RTLD_DEFAULT, ksym->name);
-                    if (!addr) die("Library symbol %s not found", ksym->name);
-                    ksym->sympos = plt_idx++;
-                    assert(ksym->sympos < plt_entries && "Too many relocations into library symbols in patch");
-
-                    // jmp *%rip(-6)
-                    plt[ksym->sympos].target = addr;
-                    plt[ksym->sympos].jmpq[0] = 0xff;
-                    plt[ksym->sympos].jmpq[1] = 0x25;
-                    *((uint32_t *)&plt[ksym->sympos].jmpq[2]) = -6 - 8;
-
-                    log("    DL func %s == %p\n", ksym->name, addr);
-                }
-                reloc_src = &plt[ksym->sympos].jmpq;
-
-            } else if (rela->type == R_X86_64_PC32) {
-                void *addr = dlsym(RTLD_DEFAULT, ksym->name);
-                reloc_src = (void**)addr;
-                log("    DL var %s == %p\n", ksym->name, reloc_src);
-            } else {
-                die("Unsupported relocation type %d for library name %s\n",
-                    rela->type, ksym->name);
-            }
+            reloc_src = dlsym(RTLD_DEFAULT, ksym->name);
+            if (!reloc_src)
+                die("Library symbol %s not found", ksym->name);
         } else {
             reloc_src = wf_find_symbol(ksym->name);
             log("    local %s == %p\n", ksym->name, reloc_src);
@@ -543,6 +529,44 @@ void wf_load_patch_from_file(char *filename) {
                 die("Could not find symbol %s in original binary\n",
                     ksym->name);
             }
+        }
+
+        if (rela->type == R_X86_64_PLT32) {
+            if (ksym->sympos == 0) {
+                // Allocate space for trampolines
+                struct plt_entry {
+                    void *target;
+                    char jmpq[6];
+                };
+                struct plt_entry *plt = wf_malloc_near(sizeof(struct plt_entry));
+
+                // jmp *%rip(-6)
+                plt->target = reloc_src;
+                plt->jmpq[0] = 0xff;
+                plt->jmpq[1] = 0x25;
+                *((uint32_t *)&plt->jmpq[2]) = -6 - 8;
+                log("    PLT %s == %p (%p)\n", ksym->name, reloc_src, plt);
+
+                ksym->sympos = (uintptr_t)&plt->jmpq;
+            }
+            reloc_src = ksym->sympos;
+        } else if (rela->type == R_X86_64_GOTPCREL) {
+            if (ksym->sympos == 0) {
+                struct got_entry {
+                    void *target;
+                };
+                struct got_entry *got = wf_malloc_near(sizeof(struct got_entry));
+                ksym->sympos = (uintptr_t)got;
+                got->target = reloc_src;
+                log("    GOT %s == %p (%p)\n", ksym->name, reloc_src, got);
+            }
+            reloc_src = ksym->sympos;
+        } else if (rela->type == R_X86_64_PC32
+                   || rela->type == R_X86_64_64) {
+            log("    direct %s == %p\n", ksym->name, reloc_src);
+        } else {
+            die("Unsupported relocation type %d for library name %s\n",
+                rela->type, ksym->name);
         }
 
         void* loc;

@@ -1,9 +1,9 @@
 .PHONY: all clean
 
-CFLAGS=-ffunction-sections -fdata-sections  -g
+CFLAGS=-ffunction-sections -fdata-sections  -g -fPIE -fPIC -Wa,-mrelax-relocations=no
 LDFLAGS=-lpthread -ldl
 
-all: patch-obj1.o patch-obj2.o
+all: patch-obj1.o patch-obj2.o bin-new
 
 patch-obj1.o: bin-old obj1-old.o obj1-new.o
 	../create-patch bin-old --obj obj1-old.o obj1-new.o
