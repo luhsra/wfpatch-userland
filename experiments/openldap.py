@@ -5,6 +5,7 @@ if os.path.exists(tmp_path):
     sys.path.append(tmp_path)
 
 
+import time
 from pathlib import Path
 from versuchung.experiment import Experiment
 from versuchung.types import String, Bool,List,Integer
@@ -32,9 +33,9 @@ class Tee(object):
 
 class OpenLDAPBenchmark(Experiment):
     inputs = {
-        'openldap': Directory('/srv/scratch/dietrich/patch/openldap/'),
+        'openldap': Directory('/srv/scratch/osdi/openldap/'),
         'client-host': String('10.23.33.110'),
-        'ssh-key': File('/srv/scratch/dietrich/patch/ssh/id_rsa'),
+        'ssh-key': File('/srv/scratch/osdi/openldap/'),
         'delay': Integer(5),
         'clients': Integer(200),
         'records': Integer(50),
@@ -53,12 +54,9 @@ class OpenLDAPBenchmark(Experiment):
                      *args, **kwargs)
 
     def run(self):
-        logging.info("Build OpenLDAP in %s", self.openldap.path)
-        shell("make", cwd=self.openldap.path)
         logging.info("Build Benchmark in %s", self.openldap.path)
-        slapd = str(Path(self.openldap.path) / "servers" / "slapd" / "slapd")
 
-        shell("gcc benchmark.c -o benchmark -lpthread -lldap", cwd=self.openldap.path)
+        shell("gcc wf-benchmark/benchmark.c -o benchmark -lpthread -lldap", cwd=self.openldap.path)
         shell("scp -i %s %s/benchmark %s:/tmp/openldap-benchmark",
               self.ssh_key.path,
               self.openldap.path,
@@ -79,11 +77,15 @@ class OpenLDAPBenchmark(Experiment):
             WF_LOGFILE=self.server_log.path,
         )
 
-        server = subprocess.Popen([slapd, "-h", "ldap://0.0.0.0:1500"],
+        server = subprocess.Popen(["/usr/sbin/slapd",
+                                   "-h", "ldap://0.0.0.0:1500",
+                                   "-d", "0",
+                                   "-f", os.path.join(self.openldap.path, "wf-benchmark/slapd.conf") ],
                                   env=server_env)
         client_out_fd = open(self.client_log.path, "w+")
 
-        
+        time.sleep(3)
+
         client = subprocess.Popen(["ssh", "-i", self.ssh_key.path, self.client_host.value,
                                    "/tmp/openldap-benchmark",
                                    str(self.clients.value),
@@ -101,7 +103,7 @@ class OpenLDAPBenchmark(Experiment):
         server_ret = server.wait()
         client.wait()
         gzip.wait()
-        assert server_ret == 0, "Server Failed"
+        assert server_ret == 0, ("Server Failed", server_ret)
 
         logging.info("Undo network config")
         self.on_client("sudo tc qdisc del dev eno1 root || true")
