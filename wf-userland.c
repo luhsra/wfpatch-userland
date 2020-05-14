@@ -1,6 +1,7 @@
 #define _GNU_SOURCE 1
 #include <stdbool.h>
 #include <stdio.h>
+#include <glob.h>
 #include <stdarg.h>
 #include <pthread.h>
 #include <dlfcn.h>
@@ -23,6 +24,9 @@
 #include <elf.h>
 
 #include "wf-userland.h"
+
+static void *wf_plt_trampoline(char *name, void *func_ptr);
+
 
 static struct wf_configuration wf_config;
 
@@ -160,6 +164,11 @@ void wf_relocate(Elf64_Ehdr *ehdr, void *elf_end, Elf64_Shdr* shdr) {
            rela_num,
            section_name(shdr_target));
 
+    if (!strncmp(".rela.debug_", section_name(shdr), 12)) {
+        log(".. debug relocations, skipping.\n");
+        return;
+    }
+
     Elf64_Rela * rela = offset_to_ptr(shdr->sh_offset);
     for (unsigned i = 0; i < rela_num; i++) {
         Elf64_Rela * rela = offset_to_ptr(shdr->sh_offset + i * shdr->sh_entsize);
@@ -179,16 +188,24 @@ void wf_relocate(Elf64_Ehdr *ehdr, void *elf_end, Elf64_Shdr* shdr) {
             } else {
                 reloc_src = offset_to_ptr(symbol_section->sh_offset + symbol->st_value);
             }
-        } else {
+        } else if (symbol_name && *symbol_name == 0) {
+            log("Empty Symbol name... continue on this...\n");
+            continue;
+        } else { 
             // Find Name in original binary
             reloc_src = wf_find_symbol(symbol_name);
+            if (!reloc_src) {
+                reloc_src = dlsym(RTLD_DEFAULT, symbol_name);
+                reloc_src = wf_plt_trampoline(symbol_name, reloc_src);
+            }
             if (!reloc_src) {
                 log("Probaly `%s' is a library function that was not called in original binary. We do not support this yet.\n", symbol_name);
                 die("Could not find symbol %s.\n", symbol_name);
             }
         }
 
-        log("   %p+(%ld) -> %p (%s)\n", (void*)reloc_dst, rela->r_addend, reloc_src, symbol_name);
+        // FIXME: log_debug
+        // log("   %p+(%ld) -> %p (%s)\n", (void*)reloc_dst, rela->r_addend, reloc_src, symbol_name);
 
         void* loc;
         uint64_t val;
@@ -435,6 +452,22 @@ void *wf_malloc_near(unsigned char size) {
     return ret;
 }
 
+static void *wf_plt_trampoline(char *name, void *func_ptr) {
+    struct plt_entry {
+        void *target;
+        char jmpq[6];
+    };
+    struct plt_entry *plt = wf_malloc_near(sizeof(struct plt_entry));
+
+    // jmp *%rip(-6)
+    plt->target = func_ptr;
+    plt->jmpq[0] = 0xff;
+    plt->jmpq[1] = 0x25;
+    *((uint32_t *)&plt->jmpq[2]) = -6 - 8;
+    log("    PLT %s == %p (%p)\n", name, func_ptr, &plt->jmpq);
+
+    return &plt->jmpq;
+}
 
 void wf_load_patch_from_file(char *filename) {
     void * elf_end;
@@ -497,7 +530,8 @@ void wf_load_patch_from_file(char *filename) {
         void* page = addr_to_page(jumpsite);
         int rc = mprotect(page, pagesize, PROT_WRITE | PROT_EXEC | PROT_READ);
         
-        if (rc == -1) die_perror("mprotect", "Callsite Patching\n");
+        if (rc == -1)
+            die_perror("mprotect", "Cannot patch callsite at %p\n", page);
         
         *jumpsite = 0xe9; // jmp == 0xe9 OF OF OF OF
         *(int32_t*)(jumpsite + 1) = funcs[f].new_addr - 5 -funcs[f].old_addr;
@@ -535,20 +569,7 @@ void wf_load_patch_from_file(char *filename) {
         if (rela->type == R_X86_64_PLT32) {
             if (ksym->sympos == 0) {
                 // Allocate space for trampolines
-                struct plt_entry {
-                    void *target;
-                    char jmpq[6];
-                };
-                struct plt_entry *plt = wf_malloc_near(sizeof(struct plt_entry));
-
-                // jmp *%rip(-6)
-                plt->target = reloc_src;
-                plt->jmpq[0] = 0xff;
-                plt->jmpq[1] = 0x25;
-                *((uint32_t *)&plt->jmpq[2]) = -6 - 8;
-                log("    PLT %s == %p (%p)\n", ksym->name, reloc_src, plt);
-
-                ksym->sympos = (uintptr_t)&plt->jmpq;
+                ksym->sympos = (uintptr_t)wf_plt_trampoline(ksym->name, reloc_src);
             }
             reloc_src = ksym->sympos;
         } else if (rela->type == R_X86_64_GOTPCREL || rela->type == R_X86_64_REX_GOTPCRELX) {
@@ -626,8 +647,21 @@ bool wf_load_patch(void) {
         p = patch_stack;
         while (patch = strtok_r(p, ",", &saveptr)){
             p = NULL;
-            log("loading patch: %s\n", patch);
-            wf_load_patch_from_file(patch);
+            if (strchr(patch, '*')){
+                log("loading patch glob: %s\n", patch);
+                glob_t globbuf;
+                if (glob(patch, 0, NULL, &globbuf) != 0) {
+                    die("glob failed: %s\n", patch);
+                }
+                for (unsigned i = 0; i < globbuf.gl_pathc; i++) {
+                    log("loading patch: %s\n", globbuf.gl_pathv[i]);
+                    wf_load_patch_from_file(globbuf.gl_pathv[i]);
+                }
+                globfree(&globbuf);
+            } else {
+                log("loading patch: %s\n", patch);
+                wf_load_patch_from_file(patch);
+            }
         }
 
         wf_log("- [patched, %.4f, \"%s\"]\n",
