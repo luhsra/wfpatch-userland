@@ -1,4 +1,5 @@
 import time
+import os
 from pathlib import Path
 from versuchung.experiment import Experiment
 from versuchung.types import String, Bool,List,Integer
@@ -9,6 +10,7 @@ from versuchung.execute import shell
 from versuchung.tex import DatarefDict
 from urllib.request import urlopen
 from urllib.error import URLError
+from collections import defaultdict
 import subprocess
 import logging
 import traceback
@@ -16,12 +18,13 @@ import sys
 
 class WaitFreeExperiment(Experiment):
     CLIENT_HOST = '10.23.33.110'
-    CLIENT_SSH_KEY = '/srv/scratch/dietrich/patch/ssh/id_rsa'
+    CLIENT_SSH_KEY = '/srv/scratch/osdi/ssh/id_rsa'
 
     inputs = {
         'delay': Integer(0),
-        'mode': String("base"),
+        'mode': String("global"),
         'count': Integer(10),
+        'patches': Directory("/dev/null"),
     }
     
     outputs = {
@@ -45,6 +48,9 @@ class WaitFreeExperiment(Experiment):
                      dst,
         )
 
+    def with_patches(self):
+        return self.patches.path != "/dev/null"
+
 
     def setup_experiment(self):
         # Sudoers on client Machine
@@ -55,12 +61,17 @@ class WaitFreeExperiment(Experiment):
         if self.delay.value > 0:
             self.client_shell(f"sudo tc qdisc add dev eno1 root netem delay {self.delay.value}ms")
 
-        WF_CYCLIC_BOUND = self.count.value + 10
+        return self.count.value
+
+    def server_env(self, run):
+        logfile = self.server_log.path
+        if run != 0:
+            logfile += f".{run}"
 
         server_env = dict(
             WF_CYCLIC="1",
-            WF_CYCLIC_BOUND=str(WF_CYCLIC_BOUND),
-            WF_LOGFILE=self.server_log.path,
+            WF_CYCLIC_BOUND=str(self.count.value),
+            WF_LOGFILE=logfile,
             WF_GLOBAL="-1",
         )
         if self.mode.value == "local":
@@ -68,6 +79,27 @@ class WaitFreeExperiment(Experiment):
         elif self.mode.value == "global":
             server_env["WF_GLOBAL"] = "1"
 
+        if self.with_patches():
+            patch_files = sorted(self.patches.value)
+            patch_groups = []
+            patches = defaultdict(list)
+            for p in patch_files:
+                pg = p.split("-")[0]
+                patch_groups.append(pg)
+                patches[pg].append(
+                    os.path.join(
+                        self.patches.path,
+                        p
+                    )
+                )
+
+            patch_queue = []
+            for pg in patch_groups:
+                patch_queue.append(",".join(patches[pg]))
+
+            server_env["WF_PATCH_QUEUE"] = ";".join(patch_queue)
+            server_env["WF_CYCLIC_BOUND"] = str(len(patch_queue))
+                
         return server_env
 
     def teardown_experiment(self):
@@ -87,9 +119,13 @@ class WaitFreeExperiment(Experiment):
             except URLError:
                 time.sleep(0.4)
 
-    def client_popen(self, args, **kwargs):
+    def client_popen(self, args, run=0, **kwargs):
         logging.info("Start Client: %s", args)
-        client_out_fd = open(self.client_log.path, "w+")
+        logfile = self.client_log.path
+        if run != 0:
+            logfile += f".{run}"
+
+        client_out_fd = open(logfile, "w+")
 
         client = subprocess.Popen(
             ["ssh", "-i", self.CLIENT_SSH_KEY, self.CLIENT_HOST] + list(args),
