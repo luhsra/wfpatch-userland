@@ -40,7 +40,11 @@ class OpenLDAPBenchmark(WaitFreeExperiment):
 
         for run in range(0, runs):
             logging.info("Run %d", run)
-            server_env = self.server_env(run=run)
+            server_env = self.server_env(
+                run=run,
+                WF_CYCLIC="0.5",
+                WF_CYCLIC_BOOT="3",
+            )
 
             subprocess.call("pkill -9 slapd.old", shell=True)
             print(server_env)
@@ -75,7 +79,7 @@ class OpenLDAPBenchmark(WaitFreeExperiment):
 
 if __name__ == "__main__":
     if sys.argv[1] == "all":
-        for delay in [5, 10, 25, 50]:
+        for delay in [0, 5, 10, 25, 50]:
             for mode in ["local", "global"]:
                 experiment = OpenLDAPBenchmark()
                 experiment(sys.argv[2:] + [

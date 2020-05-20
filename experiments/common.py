@@ -61,15 +61,19 @@ class WaitFreeExperiment(Experiment):
         if self.delay.value > 0:
             self.client_shell(f"sudo tc qdisc add dev eno1 root netem delay {self.delay.value}ms")
 
-        return self.count.value
+        if self.with_patches():
+            return self.count.value
+        else:
+            return 1
 
-    def server_env(self, run):
+    def server_env(self, run, WF_CYCLIC="1", WF_CYCLIC_BOOT="3"):
         logfile = self.server_log.path
         if run != 0:
             logfile += f".{run}"
 
         server_env = dict(
-            WF_CYCLIC="1",
+            WF_CYCLIC_BOOT=WF_CYCLIC_BOOT,
+            WF_CYCLIC=WF_CYCLIC,
             WF_CYCLIC_BOUND=str(self.count.value),
             WF_LOGFILE=logfile,
             WF_GLOBAL="-1",
@@ -78,6 +82,8 @@ class WaitFreeExperiment(Experiment):
             server_env["WF_GLOBAL"] = "0"
         elif self.mode.value == "global":
             server_env["WF_GLOBAL"] = "1"
+        else:
+            raise RuntimeError()
 
         if self.with_patches():
             patch_files = sorted(self.patches.value)
