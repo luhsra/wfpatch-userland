@@ -22,7 +22,14 @@ def diff_obj(args, symtab, old, new):
     patch_file = f"{args.prefix}--{name}"
     cmd = [args.create_diff_object, old, new, 'main', symtab, "IGNORED", name, patch_file]
     logging.info("Create Patch: %s", " ".join(cmd))
-    subprocess.check_call(cmd)
+    try:
+        subprocess.check_call(cmd)
+    except subprocess.CalledProcessError as e:
+        if e.returncode == 3:
+            logging.info("create-diff-object found no changes. Patch not created.")
+            return None
+        else:
+            raise
     return patch_file
 
 if __name__ == "__main__":
@@ -43,6 +50,7 @@ if __name__ == "__main__":
     patches = []
     for obj in args.obj:
         fn = diff_obj(args, symbols.name, obj[0], obj[1])
-        patches.append(fn)
+        if fn:
+            patches.append(fn)
 
     print("WF_PATCH_QUEUE=\"{};\"".format(",".join(patches)))
