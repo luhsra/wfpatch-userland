@@ -740,6 +740,10 @@ static double wf_config_get_double(char * name, double default_value) {
     return ret;
 }
 
+double time_diff(struct timespec now, struct timespec future) {
+    return ( future.tv_sec - now.tv_sec )
+        +  ( future.tv_nsec - now.tv_nsec ) / 1E9;
+}
 
 
 
@@ -755,8 +759,17 @@ static void* wf_patch_thread_entry(void *arg) {
         }
     }
 
+    int wait = wf_config_get("WF_CYCLIC_BOOT", -1);
+    if (wait > 0) {
+        sleep(wait);
+    }
+
+
     pthread_mutex_t __dummy;
     pthread_mutex_init(&__dummy, NULL);
+
+    struct timespec absolute_wait;
+    clock_gettime(CLOCK_REALTIME, &absolute_wait);
 
     pthread_mutex_lock(&__dummy);
     while (true) {
@@ -771,12 +784,30 @@ static void* wf_patch_thread_entry(void *arg) {
                 log("Cyclic test was OK\n");
                 _exit(0);
             }
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_sec += (int)wait;
-            ts.tv_nsec += (int)((wait - (int) wait) * 1e9);
+            struct timespec now;
+            clock_gettime(CLOCK_REALTIME, &now);
+            double wait_remaining;
+            do {
+                absolute_wait.tv_sec  += (int)wait;
+                absolute_wait.tv_nsec += (int)((wait - (int) wait) * 1e9);
+                while (absolute_wait.tv_nsec > 1e9) {
+                    absolute_wait.tv_sec  += 1;
+                    absolute_wait.tv_nsec  -= 1000000000;
+                }
+                // printf("%ld\n", absolute_wait.tv_nsec);
 
-            pthread_cond_timedwait(&wf_cond_initiate, &__dummy, &ts);
+                wait_remaining = time_diff(now, absolute_wait);
+            } while(wait_remaining < 0);
+
+            // log("sleeping for %f seconds\n", wait_remaining);
+            errno = pthread_cond_timedwait(&wf_cond_initiate, &__dummy, &absolute_wait);
+            // perror("cond timedwait");
+
+            struct timespec now2;
+            clock_gettime(CLOCK_REALTIME, &now2);
+
+            double waited = time_diff(now, now2);
+            log("waited for %f seconds\n", waited);
         }
 
         wf_initiate_patching();
@@ -845,6 +876,7 @@ static void wf_initiate_patching(void) {
     wf_timestamp_reset();
 
     pthread_mutex_lock(&wf_mutex_thread_count);
+    wf_migrated_threads = 0;
     // Retrieve the current number of threads from the application,
     // otherwise, we rely on the thread_birth() and thread_death()
     // library calls.
@@ -860,7 +892,7 @@ static void wf_initiate_patching(void) {
            wf_existing_threads
         );
 
-    wf_migrated_threads = 0;
+
 
     wf_timepoints = malloc(sizeof(time_thread_point_t) *  (wf_existing_threads + 10));
     wf_timepoints_idx = 0;
@@ -966,7 +998,7 @@ void wf_global_quiescence(char *name, unsigned int threads) {
         wf_timepoint(name, threads);
 
         pthread_mutex_lock(&wf_mutex_thread_count);
-        wf_migrated_threads += 1;
+        __sync_fetch_and_add(&wf_migrated_threads, 1);
 
         // Signal that one thread has reached the barrier
         if (wf_config.thread_migrated) {
@@ -993,8 +1025,8 @@ void wf_local_quiescence(char *name) {
 
             // Wakeup Patcher Threads
             pthread_mutex_lock(&wf_mutex_thread_count);
-            wf_migrated_threads += 1;
-            
+            __sync_fetch_and_add(&wf_migrated_threads, 1);
+
             if (wf_config.thread_migrated) {
                 int remaining = wf_existing_threads - wf_migrated_threads;
                 // printf("remaining: %s %d\n", name, remaining);
@@ -1043,6 +1075,11 @@ void wf_thread_death(char *name) {
 void wf_init(struct wf_configuration config) {
     wf_global = wf_config_get("WF_GLOBAL", 1);
     wf_load_symbols("/proc/self/exe");
+
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+    pthread_condattr_setclock(&attr, CLOCK_REALTIME);
+    pthread_cond_init(&wf_cond_initiate, &attr);
 
     assert((config.track_threads
             || config.thread_count != NULL)
