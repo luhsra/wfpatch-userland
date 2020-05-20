@@ -41,6 +41,8 @@ struct wf_configuration {
     void (*trigger_global_quiescence)(void);
     void (*trigger_local_quiescence)(void);
 
+    void (*thread_migrated)(int remaining);
+
     // OPTIONAL: Is called after patching is done.
     void (*patch_applied)(void);
 

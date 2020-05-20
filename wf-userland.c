@@ -77,18 +77,31 @@ int wf_kernel_pin(void* start, void* end) {
     int rc = syscall(1002, start_page, end_page - start_page);
     log("memory pin [%p:+0x%lx]: rc=%d\n", (void*)start_page,
         end_page - start_page, rc);
+    if (rc == -1)
+        die_perror("wf_kernel_pin", "Could not unshare the text segment");
+    
     return rc;
 }
 
 int wf_kernel_as_new(void) {
     int rc = syscall(1000);
-    log("AS create: %d\n", rc);
+    // log("AS create: %d\n", rc);
+    if (rc == -1)
+        die_perror("wf_kernel_as_new", "Could not create a new address space");
     return rc;
 }
 
 int wf_kernel_as_switch(int as_id) {
     int rc = syscall(1001, as_id);
-    log("AS switch: %d %d\n", as_id, rc);
+    // log("AS switch: %d %d\n", as_id, rc);
+    if (rc == -1)
+        die_perror("wf_kernel_as_switch", "Could not migrate to the new address space");
+    return rc;
+}
+
+int wf_kernel_as_delete(int as_id) {
+    int rc = syscall(1003, as_id);
+    log("address space delete(%d)=%d\n", as_id, rc);
     return rc;
 }
 
@@ -411,7 +424,7 @@ dl_iterate_cb(struct dl_phdr_info *info, size_t size, void *data) {
 }
 
 
-void *wf_load_symbols(char *filename) {
+void wf_load_symbols(char *filename) {
     void * elf_end;
     Elf64_Ehdr * ehdr = wf_load_elf(filename, /* I don't care where */ 0, &elf_end);
 
@@ -696,6 +709,8 @@ static pthread_cond_t wf_cond_to_threads;
 static volatile int wf_target_generation;
 static __thread int wf_current_generation;
 static volatile int generation_id;
+static volatile int previous_generation_id;
+
 
 
 
@@ -713,6 +728,16 @@ static int wf_config_get(char * name, int default_value) {
     ret = strtol(env, &ptr, 10);
     if (!ptr || *ptr != '\0') die("invalid env config %s: %s", name, env);
     return (int) ret;
+}
+
+static double wf_config_get_double(char * name, double default_value) {
+    char *env = getenv(name);
+    if (!env) return default_value;
+    char *ptr;
+    double ret;
+    ret = strtod(env, &ptr);
+    if (!ptr || *ptr != '\0') die("invalid env config %s: %s", name, env);
+    return ret;
 }
 
 
@@ -736,7 +761,7 @@ static void* wf_patch_thread_entry(void *arg) {
     pthread_mutex_lock(&__dummy);
     while (true) {
         // Wait for signal, or do periodic tests
-        int wait = wf_config_get("WF_CYCLIC", -1);
+        double wait = wf_config_get_double("WF_CYCLIC", -1);
         int bound = wf_config_get("WF_CYCLIC_BOUND", -1);
         if (wait == -1) {
             pthread_cond_wait(&wf_cond_initiate, &__dummy);
@@ -748,7 +773,9 @@ static void* wf_patch_thread_entry(void *arg) {
             }
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_sec += wait;
+            ts.tv_sec += (int)wait;
+            ts.tv_nsec += (int)((wait - (int) wait) * 1e9);
+
             pthread_cond_timedwait(&wf_cond_initiate, &__dummy, &ts);
         }
 
@@ -870,7 +897,8 @@ static void wf_initiate_patching(void) {
         pthread_mutex_unlock(&wf_mutex_thread_count);
         ////////////////////////////////////////////////////////////////
     } else if (wf_global == 0) {
-        // FIXME: Insert Patching
+        previous_generation_id = generation_id;
+
         generation_id = wf_kernel_as_new();
 
         wf_kernel_as_switch(generation_id);
@@ -890,7 +918,9 @@ static void wf_initiate_patching(void) {
         while (wf_migrated_threads < wf_existing_threads)
             pthread_cond_wait(&wf_cond_from_threads, &wf_mutex_thread_count);
 
-        double wf_time_migrated = wf_timestamp();
+        // After successful migration of all threads, we try to delete
+        // the previous address-space generation
+        wf_kernel_as_delete(previous_generation_id);
 
         wf_timepoint_dump();
 
@@ -937,6 +967,13 @@ void wf_global_quiescence(char *name, unsigned int threads) {
 
         pthread_mutex_lock(&wf_mutex_thread_count);
         wf_migrated_threads += 1;
+
+        // Signal that one thread has reached the barrier
+        if (wf_config.thread_migrated) {
+            int remaining = wf_existing_threads - wf_migrated_threads;
+            wf_config.thread_migrated(remaining);
+        }
+        
         if (wf_migrated_threads == wf_existing_threads) {
             pthread_cond_signal(&wf_cond_from_threads);
         }
@@ -957,6 +994,13 @@ void wf_local_quiescence(char *name) {
             // Wakeup Patcher Threads
             pthread_mutex_lock(&wf_mutex_thread_count);
             wf_migrated_threads += 1;
+            
+            if (wf_config.thread_migrated) {
+                int remaining = wf_existing_threads - wf_migrated_threads;
+                // printf("remaining: %s %d\n", name, remaining);
+                wf_config.thread_migrated(remaining);
+            }
+
             if (wf_migrated_threads == wf_existing_threads) {
                 pthread_cond_signal(&wf_cond_from_threads);
             }
@@ -1003,7 +1047,6 @@ void wf_init(struct wf_configuration config) {
     assert((config.track_threads
             || config.thread_count != NULL)
            && "Either .track_threads or .thread_count must be given");
-
 
     // Copy(!) away the configuration that we got from the
     // configuration
