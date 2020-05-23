@@ -101,7 +101,7 @@ int wf_kernel_as_switch(int as_id) {
 
 int wf_kernel_as_delete(int as_id) {
     int rc = syscall(1003, as_id);
-    log("address space delete(%d)=%d\n", as_id, rc);
+    // log("address space delete(%d)=%d\n", as_id, rc);
     return rc;
 }
 
@@ -762,6 +762,55 @@ static void* wf_patch_thread_entry(void *arg) {
     int wait = wf_config_get("WF_CYCLIC_BOOT", -1);
     if (wait > 0) {
         sleep(wait);
+        log("WF_CYCLIC_BOOT is done\n");
+    }
+
+    {
+        int mode;
+        if ((mode = wf_config_get("WF_CYCLIC_MICRO", 0)) != 0) {
+            int cycles = wf_config_get("WF_CYCLIC_BOUND", 1000000);
+
+            if (mode == 1) {
+                log("Perform microbenchmark: AS Create+Destroy\n");
+                wf_log("microbench%d\n", mode);
+
+                for (unsigned i = 0; i < cycles; i++) {
+                    wf_timestamp_reset();
+
+                    int new_as = wf_kernel_as_new();
+                    if (new_as < 0) die("as new");
+
+                    int rc = wf_kernel_as_delete(new_as);
+                    if (rc < 0) die("as delete");
+
+                    double duration = wf_timestamp();
+                    wf_log("%f\n", duration);
+                }
+            }
+
+            if (mode == 2) {
+                log("Perform microbenchmark: AS Switch\n");
+                wf_log("microbench%d\n", mode);
+
+                int new_as = wf_kernel_as_new();
+                if (new_as < 0) die("as new");
+
+                for (unsigned i = 0; i < cycles; i++) {
+                    wf_timestamp_reset();
+
+                    int rc = wf_kernel_as_switch(new_as);
+                    if (rc < 0) die("as switch");
+
+                    rc = wf_kernel_as_switch(0);
+                    if (rc < 0) die("as switch");
+
+                    double duration = wf_timestamp();
+                    wf_log("%f\n", duration);
+                }
+            }
+
+            exit(0);
+        }
     }
 
 
@@ -1097,7 +1146,7 @@ void wf_init(struct wf_configuration config) {
 
     char *logfile = getenv("WF_LOGFILE");
     if (logfile) {
-        fprintf(stderr, "opening wf logfile: %s\n", logfile);
+        log("opening wf logfile: %s\n", logfile);
         wf_log_file = fopen(logfile, "w+");
     } else {
         wf_log_file = stderr;
