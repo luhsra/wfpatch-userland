@@ -66,7 +66,7 @@ class WaitFreeExperiment(Experiment):
         else:
             return 1
 
-    def server_env(self, run, WF_CYCLIC="1", WF_CYCLIC_BOOT="3"):
+    def server_env(self, run, WF_CYCLIC="1", WF_CYCLIC_BOOT="3",WF_CYCLIC_RANDOM=None):
         logfile = self.server_log.path
         if run != 0:
             logfile += f".{run}"
@@ -78,6 +78,9 @@ class WaitFreeExperiment(Experiment):
             WF_LOGFILE=logfile,
             WF_GLOBAL="-1",
         )
+        if WF_CYCLIC_RANDOM:
+            server_env['WF_CYCLIC_RANDOM'] = WF_CYCLIC_RANDOM
+
         if self.mode.value == "local":
             server_env["WF_GLOBAL"] = "0"
         elif self.mode.value == "global":

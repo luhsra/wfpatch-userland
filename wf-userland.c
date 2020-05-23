@@ -775,6 +775,12 @@ static void* wf_patch_thread_entry(void *arg) {
     while (true) {
         // Wait for signal, or do periodic tests
         double wait = wf_config_get_double("WF_CYCLIC", -1);
+        int random_ms = wf_config_get("WF_CYCLIC_RANDOM", -1);
+        if (wf_config_get("WF_CYCLIC_RANDOM", -1) != -1) {
+            random_ms = (random() % (2 * random_ms)) - random_ms;
+            // log("wf-cyclic random: %f\n", random_ms/1000.0);
+            wait += (random_ms / 1000.0);
+        }
         int bound = wf_config_get("WF_CYCLIC_BOUND", -1);
         if (wait == -1) {
             pthread_cond_wait(&wf_cond_initiate, &__dummy);
