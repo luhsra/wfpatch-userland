@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 import os, sys
-tmp_path = "%s/git/versuchung/src"% os.environ["HOME"]
+tmp_path = "%s/versuchung/src"% os.environ["HOME"]
 if os.path.exists(tmp_path):
     sys.path.append(tmp_path)
 
@@ -21,7 +21,7 @@ from common import WaitFreeExperiment
 
 
 class OpenLDAPBenchmark(WaitFreeExperiment):
-    OPENLDAP_SERVER_DIR           = "/srv/scratch/osdi/openldap"
+    OPENLDAP_SERVER_DIR           = "/home/user/openldap"
 
     inputs = dict(WaitFreeExperiment.inputs)
     inputs['clients'] =  Integer(200)
