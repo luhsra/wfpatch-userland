@@ -948,7 +948,7 @@ static void wf_initiate_patching(void) {
         );
 
 
-
+    // FIXME reserve more threads, workaround for thread birth
     wf_timepoints = malloc(sizeof(time_thread_point_t) *  (wf_existing_threads + 10));
     wf_timepoints_idx = 0;
 
@@ -977,6 +977,8 @@ static void wf_initiate_patching(void) {
 
         // Load and Apply the patch
         wf_load_patch();
+
+        wf_state = IDLE;
 
         ////////////////////////////////////////////////////////////////
         // Let's leave the global quiescence point
@@ -1011,14 +1013,14 @@ static void wf_initiate_patching(void) {
 
         wf_timepoint_dump();
 
+        wf_state = IDLE;
+
         pthread_mutex_unlock(&wf_mutex_thread_count);
     } else {
         pthread_mutex_unlock(&wf_mutex_thread_count);
         /* WF_GLOBAL < 0 */
         wf_target_generation ++;
     }
-
-    wf_state = IDLE;
 
     double wf_time_end = wf_timestamp();
     wf_log("- [finished, %.4f]\n", wf_time_end);
@@ -1117,8 +1119,11 @@ void wf_thread_death(char *name) {
 
     pthread_mutex_lock(&wf_mutex_thread_count);
     wf_existing_threads -= 1;
-    // Wakeup pather thread in case we were the last thread.
+    // Wakeup patcher thread in case we were the last thread.
     if (wf_state == LOCAL_QUIESCENCE || wf_state == GLOBAL_QUIESCENCE){
+        if (wf_target_generation == wf_current_generation) {
+            wf_migrated_threads -= 1;
+        }
         wf_log("- [death, %.2f, \"%s\"]\n", wf_timestamp(), name);
         if (wf_migrated_threads == wf_existing_threads) {
             pthread_cond_signal(&wf_cond_from_threads);
