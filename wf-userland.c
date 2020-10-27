@@ -121,8 +121,6 @@ bool wf_relocate_calc(unsigned type,
 
     uintptr_t S = reloc_src, A = reloc_addend, P = reloc_dst;
 
-    uintptr_t GOT = (uintptr_t) &_GLOBAL_OFFSET_TABLE_;
-
 #define is_pc32_rel(x) ((INT_MIN <= (intptr_t) (x)) && ((intptr_t) (x) <= INT_MAX))
 
     *loc = (void*) reloc_dst;
