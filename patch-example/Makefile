@@ -3,6 +3,10 @@
 CFLAGS=-ffunction-sections -fdata-sections  -g -fPIE -fPIC #-Wa,-mrelax-relocations=no
 LDFLAGS=-lpthread -ldl
 
+ifeq (, $(shell which create-diff-object))
+$(error "No create-diff-object from kpatch in $(PATH), see ../.gitexternals")
+endif
+
 all: patch-obj1.o patch-obj2.o bin-new
 
 patch-obj1.o: bin-old obj1-old.o obj1-new.o
